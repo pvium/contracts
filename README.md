@@ -172,25 +172,23 @@ The UniversalDexRouter functions as a **stateless router**, not a custodian:
 
 | Network | Chain ID | UniversalDexRouter | DEX Integration | Status |
 |---------|----------|-------------------|-----------------|--------|
-| **Base** | 8453 | `0xbe31BE82b488321b7acFAc3bd41998C9843B2e71` | Aerodrome (V2), Uniswap V3 | ✅ Production |
+| **Base** | 8453 | `0xbe31BE82b488321b7acFAc3bd41998C9843B2e71` |  Uniswap V2, Aerodrome (Coming soon), | ✅ Production |
 | **BNB Chain** | 56 | `0xbe31BE82b488321b7acFAc3bd41998C9843B2e71` | PancakeSwap V2 | ✅ Production |
-| Ethereum | 1 | - | Uniswap V2/V3 | 🔜 Coming Soon |
-| Arbitrum | 42161 | - | Uniswap V3 | 🔜 Coming Soon |
-| Optimism | 10 | - | Uniswap V3 | 🔜 Coming Soon |
-| Polygon | 137 | - | Uniswap V3 | 🔜 Coming Soon |
+
+
 
 ### Testnet Deployments
 
 | Network | Chain ID | UniversalDexRouter | Status |
 |---------|----------|-------------------|--------|
-| Base Sepolia | 84532 | TBD | 🔧 Development |
+| Base Sepolia | 84532 | `0x45B6540EE63a9455e4d405C50446F1Abc90b5BF4` | 🔧 Development |
 
-### External Dependencies
+### External Routers
 
 | Network | DEX Router | Address |
 |---------|-----------|---------|
 | BNB Chain | PancakeSwap V2 | `0x10ED43C718714eb63d5aA57B78B54704E256024E` |
-| Base | Aerodrome | TBD |
+| Base | Uniswap | `0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24` |
 
 ## Integration Guide
 
