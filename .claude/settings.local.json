@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(yarn init -y)",
+      "Bash(yarn add:*)",
+      "Bash(mkdir:*)",
+      "Bash(npx hardhat test:*)",
+      "WebFetch(domain:docs.base.org)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
