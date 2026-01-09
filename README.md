@@ -510,7 +510,7 @@ This project is licensed under the **MIT License**. See `LICENSE` file for full 
 | Resource | Link |
 |----------|------|
 | **Telegram Community** | [@pviumapp](https://t.me/pviumapp) |
-| **Twitter** | [@pviumapp]](https://x.com/pviumapp) |
+| **Twitter** | [@pviumapp](https://x.com/pviumapp) |
 | **Email Support** | support@pvium.com |
 | **Security Contact** | security@pvium.com |
 
