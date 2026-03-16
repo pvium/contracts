@@ -35,7 +35,7 @@ contract SmartEscrow is ReentrancyGuard {
         uint256 appFeeBps;
         uint256 pviumFeeBps;
         uint256 disputeWindowSeconds;
-        uint256 lockDuration;
+        uint256 lockDurationSeconds;
         uint256 minimumBalancePerVendor;
         uint256 maxNumVendors;
         address appFeeAddress;
@@ -52,7 +52,7 @@ contract SmartEscrow is ReentrancyGuard {
         address appAdminAddress;
         uint256 appFeeBps;
         uint256 disputeWindowSeconds;
-        uint256 lockDuration;
+        uint256 lockDurationSeconds;
         uint256 minimumBalancePerVendor;
         uint256 maxNumVendors;
     }
@@ -97,7 +97,7 @@ contract SmartEscrow is ReentrancyGuard {
     uint256 public appFeeBps;
     uint256 public pviumFeeBps;
     uint256 public disputeWindowSeconds;
-    uint256 public lockDuration;
+    uint256 public lockDurationSeconds;
     uint256 public minimumBalancePerVendor;
     uint256 public maxNumVendors;
 
@@ -180,7 +180,7 @@ contract SmartEscrow is ReentrancyGuard {
         appFeeBps = _appFeeBps;
         pviumFeeBps = _pviumFeeBps;
         disputeWindowSeconds = _disputeWindowSeconds;
-        lockDuration = _lockDuration;
+        lockDurationSeconds = _lockDuration;
         minimumBalancePerVendor = _minimumBalancePerVendor;
         maxNumVendors = _maxNumVendors;
         appFeeAddress = _appFeeAddress;
@@ -679,7 +679,7 @@ contract SmartEscrow is ReentrancyGuard {
             appFeeBps,
             pviumFeeBps,
             disputeWindowSeconds,
-            lockDuration,
+            lockDurationSeconds,
             minimumBalancePerVendor,
             maxNumVendors,
             appFeeAddress,

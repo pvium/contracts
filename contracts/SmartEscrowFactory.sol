@@ -168,7 +168,7 @@ contract SmartEscrowFactory is AccessControl {
                 payload.appAdminAddress,
                 payload.appFeeBps,
                 payload.disputeWindowSeconds,
-                payload.lockDuration,
+                payload.lockDurationSeconds,
                 payload.minimumBalancePerVendor,
                 pviumFeeBps,
                 block.chainid

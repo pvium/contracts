@@ -119,48 +119,64 @@ describe("SmartEscrow System", function () {
             const appId = "test-app";
             const projectId = "project-001";
             const metadata = "ipfs://Qm...";
-            const lockDuration = (await time.latest()) + 90 * 24 * 60 * 60; // 90 days
-            const minBalance = ethers.parseUnits("100", 6); // $100 per vendor
+            const lockDurationSeconds =
+              (await time.latest()) + 90 * 24 * 60 * 60; // 90 days
+            const minBalance = ethers.parseUnits('100', 6); // $100 per vendor
             const maxVendors = 10;
 
             const payload = {
-                app: appId,
-                projectId: projectId,
-                metadata: metadata,
-                tokenAddress: await mockUSDC.getAddress(),
-                refundAddress: projectOwner.address,
-                appFeeAddress: appOwner.address,
-                appAdminAddress: appOwner.address,
-                appFeeBps: APP_FEE_BPS,
-                disputeWindowSeconds: DISPUTE_WINDOW,
-                lockDuration: lockDuration,
-                minimumBalancePerVendor: minBalance,
-                maxNumVendors: maxVendors
+              app: appId,
+              projectId: projectId,
+              metadata: metadata,
+              tokenAddress: await mockUSDC.getAddress(),
+              refundAddress: projectOwner.address,
+              appFeeAddress: appOwner.address,
+              appAdminAddress: appOwner.address,
+              appFeeBps: APP_FEE_BPS,
+              disputeWindowSeconds: DISPUTE_WINDOW,
+              lockDurationSeconds: lockDurationSeconds,
+              minimumBalancePerVendor: minBalance,
+              maxNumVendors: maxVendors,
             };
 
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             // App signs the payload
             const appMessageHash = ethers.keccak256(
-                ethers.AbiCoder.defaultAbiCoder().encode(
-                    ["bytes32", "string", "string", "string", "address", "address", "address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
-                    [
-                        SIGNATURE_DOMAIN,
-                        payload.app,
-                        payload.projectId,
-                        payload.metadata,
-                        payload.tokenAddress,
-                        payload.refundAddress,
-                        payload.appFeeAddress,
-                        payload.appAdminAddress,
-                        payload.appFeeBps,
-                        payload.disputeWindowSeconds,
-                        payload.lockDuration,
-                        payload.minimumBalancePerVendor,
-                        PVIUM_FEE_BPS,
-                        chainId
-                    ]
-                )
+              ethers.AbiCoder.defaultAbiCoder().encode(
+                [
+                  'bytes32',
+                  'string',
+                  'string',
+                  'string',
+                  'address',
+                  'address',
+                  'address',
+                  'address',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                ],
+                [
+                  SIGNATURE_DOMAIN,
+                  payload.app,
+                  payload.projectId,
+                  payload.metadata,
+                  payload.tokenAddress,
+                  payload.refundAddress,
+                  payload.appFeeAddress,
+                  payload.appAdminAddress,
+                  payload.appFeeBps,
+                  payload.disputeWindowSeconds,
+                  payload.lockDurationSeconds,
+                  payload.minimumBalancePerVendor,
+                  PVIUM_FEE_BPS,
+                  chainId,
+                ],
+              ),
             );
             const appSignature = await appOwner.signMessage(ethers.getBytes(appMessageHash));
 
@@ -184,46 +200,61 @@ describe("SmartEscrow System", function () {
             const appId = "test-app";
             const projectId = "project-001";
             const metadata ="ipfs://Qm...";
-            const lockDuration =  90 * 24 * 60 * 60; // duration the project will be locked before 
+            const lockDurationSeconds = 90 * 24 * 60 * 60; // duration the project will be locked before
 
             const payload = {
-                app: appId,
-                projectId: projectId,
-                metadata: metadata,
-                tokenAddress: await mockUSDC.getAddress(),
-                refundAddress: projectOwner.address,
-                appFeeAddress: appOwner.address,
-                appAdminAddress: appOwner.address,
-                appFeeBps: APP_FEE_BPS,
-                disputeWindowSeconds: DISPUTE_WINDOW,
-                lockDuration: lockDuration,
-                minimumBalancePerVendor: ethers.parseUnits("100", 6),
-                maxNumVendors: 10
+              app: appId,
+              projectId: projectId,
+              metadata: metadata,
+              tokenAddress: await mockUSDC.getAddress(),
+              refundAddress: projectOwner.address,
+              appFeeAddress: appOwner.address,
+              appAdminAddress: appOwner.address,
+              appFeeBps: APP_FEE_BPS,
+              disputeWindowSeconds: DISPUTE_WINDOW,
+              lockDurationSeconds: lockDurationSeconds,
+              minimumBalancePerVendor: ethers.parseUnits('100', 6),
+              maxNumVendors: 10,
             };
 
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             // App signs the payload
             const appMessageHash = ethers.keccak256(
-                ethers.AbiCoder.defaultAbiCoder().encode(
-                    ["bytes32", "string", "string", "string", "address", "address", "address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
-                    [
-                        SIGNATURE_DOMAIN,
-                        payload.app,
-                       payload.projectId,
-                        payload.metadata,
-                        payload.tokenAddress,
-                        payload.refundAddress,
-                        payload.appFeeAddress,
-                        payload.appAdminAddress,
-                        payload.appFeeBps,
-                        payload.disputeWindowSeconds,
-                        payload.lockDuration,
-                        payload.minimumBalancePerVendor,
-                        PVIUM_FEE_BPS,
-                        chainId
-                    ]
-                )
+              ethers.AbiCoder.defaultAbiCoder().encode(
+                [
+                  'bytes32',
+                  'string',
+                  'string',
+                  'string',
+                  'address',
+                  'address',
+                  'address',
+                  'address',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                  'uint256',
+                ],
+                [
+                  SIGNATURE_DOMAIN,
+                  payload.app,
+                  payload.projectId,
+                  payload.metadata,
+                  payload.tokenAddress,
+                  payload.refundAddress,
+                  payload.appFeeAddress,
+                  payload.appAdminAddress,
+                  payload.appFeeBps,
+                  payload.disputeWindowSeconds,
+                  payload.lockDurationSeconds,
+                  payload.minimumBalancePerVendor,
+                  PVIUM_FEE_BPS,
+                  chainId,
+                ],
+              ),
             );
             const appSignature = await appOwner.signMessage(ethers.getBytes(appMessageHash));
 
@@ -254,46 +285,61 @@ describe("SmartEscrow System", function () {
         maxVendors: number = 10
     ): Promise<string> {
         const metadata = "ipfs://test";
-        const lockDuration = (await time.latest()) + 90 * 24 * 60 * 60;
+        const lockDurationSeconds = (await time.latest()) + 90 * 24 * 60 * 60;
 
         const payload = {
-            app: appId,
-            projectId: projectId,
-            metadata: metadata,
-            tokenAddress,
-            refundAddress: projectOwner.address,
-            appFeeAddress: appOwner.address,
-            appAdminAddress: appOwner.address,
-            appFeeBps: APP_FEE_BPS,
-            disputeWindowSeconds: DISPUTE_WINDOW,
-            lockDuration: lockDuration,
-            minimumBalancePerVendor: minBalance,
-            maxNumVendors: maxVendors
+          app: appId,
+          projectId: projectId,
+          metadata: metadata,
+          tokenAddress,
+          refundAddress: projectOwner.address,
+          appFeeAddress: appOwner.address,
+          appAdminAddress: appOwner.address,
+          appFeeBps: APP_FEE_BPS,
+          disputeWindowSeconds: DISPUTE_WINDOW,
+          lockDurationSeconds: lockDurationSeconds,
+          minimumBalancePerVendor: minBalance,
+          maxNumVendors: maxVendors,
         };
 
         const chainId = (await ethers.provider.getNetwork()).chainId;
 
         // App signs the payload
         const appMessageHash = ethers.keccak256(
-            ethers.AbiCoder.defaultAbiCoder().encode(
-                ["bytes32", "string", "string", "string", "address", "address", "address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
-                [
-                    SIGNATURE_DOMAIN,
-                    payload.app,
-                    payload.projectId,
-                    payload.metadata,
-                    payload.tokenAddress,
-                    payload.refundAddress,
-                    payload.appFeeAddress,
-                    payload.appAdminAddress,
-                    payload.appFeeBps,
-                    payload.disputeWindowSeconds,
-                    payload.lockDuration,
-                    payload.minimumBalancePerVendor,
-                    PVIUM_FEE_BPS,
-                    chainId
-                ]
-            )
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            [
+              'bytes32',
+              'string',
+              'string',
+              'string',
+              'address',
+              'address',
+              'address',
+              'address',
+              'uint256',
+              'uint256',
+              'uint256',
+              'uint256',
+              'uint256',
+              'uint256',
+            ],
+            [
+              SIGNATURE_DOMAIN,
+              payload.app,
+              payload.projectId,
+              payload.metadata,
+              payload.tokenAddress,
+              payload.refundAddress,
+              payload.appFeeAddress,
+              payload.appAdminAddress,
+              payload.appFeeBps,
+              payload.disputeWindowSeconds,
+              payload.lockDurationSeconds,
+              payload.minimumBalancePerVendor,
+              PVIUM_FEE_BPS,
+              chainId,
+            ],
+          ),
         );
         const appSignature = await appOwner.signMessage(ethers.getBytes(appMessageHash));
 
