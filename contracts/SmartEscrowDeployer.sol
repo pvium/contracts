@@ -33,7 +33,7 @@ contract SmartEscrowDeployer {
             payload.appFeeBps,
             pviumFeeBps,
             payload.disputeWindowSeconds,
-            payload.lockExpiry,
+            payload.lockDuration,
             payload.minimumBalancePerVendor,
             payload.maxNumVendors,
             payload.appFeeAddress,

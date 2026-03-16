@@ -169,7 +169,6 @@ contract SmartEscrow is ReentrancyGuard {
             _appFeeBps + _pviumFeeBps <= 10000,
             "Total fees exceed 100%"
         );
-        require(_lockDuration > block.timestamp, "Lock expiry must be in future");
         require(_maxNumVendors > 0, "Max vendors must be > 0");
 
         factory = _factory;
