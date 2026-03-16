@@ -39,14 +39,14 @@ contract SmartEscrowFactory is AccessControl {
     mapping(bytes32 => address) public appFeeAddresses;
 
     // App ID => SmartEscrow addresses
-    mapping(string => address[]) private appProjects;
+    mapping(string => address[]) private appAccounts;
 
-    // Unique project tracking: hash(app || projectId) => project address
-    mapping(bytes32 => address) public projectsByUniqueId;
+    // Unique account tracking: hash(app || projectId) => account address
+    mapping(bytes32 => address) public accountsByUniqueId;
 
     // Events
     event EscrowContractCreated(
-        address indexed projectAddress,
+        address indexed accountAddress,
         string indexed appId,
         string projectId,
         bytes32 indexed uniqueId,
@@ -90,19 +90,19 @@ contract SmartEscrowFactory is AccessControl {
     }
 
     /**
-     * @notice Create a new project using CREATE2 for deterministic address
+     * @notice Create a new account using CREATE2 for deterministic address
      * @dev Address is deterministic based on (app, projectId) and all constructor params
      * @dev Requires Pvium attestation to prevent unauthorized project creation
      * @param payload SmartEscrow configuration data
      * @param appSignature App signature authorizing project creation
      * @param pviumSignature Pvium signature attesting the app owner
-     * @return projectAddress Address of the newly created project
+     * @return accountAddress Address of the newly created account
      */
-    function createProject(
+    function createAccount(
         SmartEscrow.CreateSmartEscrowPayload calldata payload,
         bytes calldata appSignature,
         bytes calldata pviumSignature
-    ) external returns (address projectAddress) {
+    ) external returns (address accountAddress) {
         // Verify app signature first
         address appAddress = _verifyAppSignature(payload, appSignature);
         require(appAddress == payload.appAdminAddress, "Not app admin");
@@ -122,20 +122,20 @@ contract SmartEscrowFactory is AccessControl {
             abi.encodePacked(payload.app, payload.projectId)
         );
 
-        // Check if project already exists
-        require(projectsByUniqueId[uniqueId] == address(0), "Project exists");
+        // Check if account already exists
+        require(accountsByUniqueId[uniqueId] == address(0), "Account exists");
         
 
-        // Deploy project using CREATE2
+        // Deploy account using CREATE2
         // Bytecode includes all parameters, preventing parameter tampering
-        projectAddress = _deployProject(payload, uniqueId);
+        accountAddress = _deployAccount(payload, uniqueId);
 
-        // Store project mappings
-        appProjects[payload.app].push(projectAddress);
-        projectsByUniqueId[uniqueId] = projectAddress;
+        // Store account mappings
+        appAccounts[payload.app].push(accountAddress);
+        accountsByUniqueId[uniqueId] = accountAddress;
 
         emit EscrowContractCreated(
-            projectAddress,
+            accountAddress,
             payload.app,
             payload.projectId,
             uniqueId,
@@ -145,7 +145,7 @@ contract SmartEscrowFactory is AccessControl {
             payload.minimumBalancePerVendor
         );
 
-        return projectAddress;
+        return accountAddress;
     }
 
     /**
@@ -208,9 +208,9 @@ contract SmartEscrowFactory is AccessControl {
     }
 
     /**
-     * @notice Internal function to deploy project using deployer contract
+     * @notice Internal function to deploy account using deployer contract
      */
-    function _deployProject(
+    function _deployAccount(
         SmartEscrow.CreateSmartEscrowPayload calldata payload,
         bytes32 uniqueId
     ) private returns (address) {
@@ -218,11 +218,11 @@ contract SmartEscrowFactory is AccessControl {
     }
 
     /**
-     * @notice Compute the deterministic project address before deployment
-     * @param payload Project configuration data
-     * @return Predicted project address
+     * @notice Compute the deterministic account address before deployment
+     * @param payload Account configuration data
+     * @return Predicted account address
      */
-    function computeProjectAddress(
+    function computeAccountAddress(
         SmartEscrow.CreateSmartEscrowPayload calldata payload
     ) external view returns (address) {
         bytes32 uniqueId = keccak256(
@@ -232,35 +232,35 @@ contract SmartEscrowFactory is AccessControl {
     }
 
     /**
-     * @notice Get project address by unique ID (app + projectId)
+     * @notice Get account address by unique ID (app + projectId)
      * @param app App identifier
      * @param projectId Project identifier
-     * @return Project address (address(0) if not deployed)
+     * @return Account address (address(0) if not deployed)
      */
-    function getProjectByUniqueId(string calldata app, string calldata projectId)
+    function getAccountByUniqueId(string calldata app, string calldata projectId)
         public
         view
         returns (address)
     {
         bytes32 uniqueId = keccak256(abi.encodePacked(app, projectId));
-        return projectsByUniqueId[uniqueId];
+        return accountsByUniqueId[uniqueId];
     }
 
     /**
-     * @notice Get paginated projects for an app
+     * @notice Get paginated accounts for an app
      * @param appId App identifier
      * @param page Page number (0-indexed)
      * @param perPage Number of items per page
-     * @return projects Array of project addresses for the requested page
-     * @return total Total number of projects for this app
+     * @return accounts Array of account addresses for the requested page
+     * @return total Total number of accounts for this app
      */
-    function getProjects(string calldata appId, uint256 page, uint256 perPage)
+    function getAccounts(string calldata appId, uint256 page, uint256 perPage)
         external
         view
-        returns (address[] memory projects, uint256 total)
+        returns (address[] memory accounts, uint256 total)
     {
-        address[] storage allProjects = appProjects[appId];
-        total = allProjects.length;
+        address[] storage allAccounts = appAccounts[appId];
+        total = allAccounts.length;
 
         uint256 startIndex = page * perPage;
         if (startIndex >= total || perPage == 0) {
@@ -270,9 +270,9 @@ contract SmartEscrowFactory is AccessControl {
         uint256 endIndex = startIndex + perPage;
         if (endIndex > total) endIndex = total;
 
-        projects = new address[](endIndex - startIndex);
-        for (uint256 i = 0; i < projects.length; i++) {
-            projects[i] = allProjects[startIndex + i];
+        accounts = new address[](endIndex - startIndex);
+        for (uint256 i = 0; i < accounts.length; i++) {
+            accounts[i] = allAccounts[startIndex + i];
         }
     }
 
@@ -378,18 +378,18 @@ contract SmartEscrowFactory is AccessControl {
 
         // Group payments by project and process
         for (uint256 i = 0; i < vendorPayments.length; i++) {
-            address projectAddress = getProjectByUniqueId(
+            address projectAddress = getAccountByUniqueId(
                 vendorPayments[i].app,
                 vendorPayments[i].projectId
             );
-            require(projectAddress != address(0), "Project not found");
+            require(projectAddress != address(0), "Account not found");
 
-            // Create single-payment array for this project
+            // Create single-payment array for this account
             SmartEscrow.VendorPayoutPayload[] memory singlePayment =
                 new SmartEscrow.VendorPayoutPayload[](1);
             singlePayment[0] = vendorPayments[i];
 
-            // Call finalizeClaim on the project contract (transfers to vendor and app)
+            // Call finalizeClaim on the account contract (transfers to vendor and app)
             // Returns total Pvium fees for this payment
            ( uint256 appFee, uint256 pviumFee ) = SmartEscrow(projectAddress).finalizeClaim(singlePayment);
 

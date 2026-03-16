@@ -114,8 +114,8 @@ describe("SmartEscrow System", function () {
         });
     });
 
-    describe("Project Creation", function () {
-        it("Should create project with valid signature", async function () {
+    describe("Account Creation", function () {
+        it("Should create account with valid signature", async function () {
             const appId = "test-app";
             const projectId = "project-001";
             const metadata = "ipfs://Qm...";
@@ -173,14 +173,14 @@ describe("SmartEscrow System", function () {
             );
             const pviumSignature = await pvium.signMessage(ethers.getBytes(pviumMessageHash));
 
-            await expect(factory.createProject(payload, appSignature, pviumSignature))
+            await expect(factory.createAccount(payload, appSignature, pviumSignature))
                 .to.emit(factory, "EscrowContractCreated");
 
-            const projectAddress = await factory.getProjectByUniqueId(appId, projectId);
-            expect(projectAddress).to.not.equal(ethers.ZeroAddress);
+            const accountAddress = await factory.getAccountByUniqueId(appId, projectId);
+            expect(accountAddress).to.not.equal(ethers.ZeroAddress);
         });
 
-        it("Should reject duplicate project creation", async function () {
+        it("Should reject duplicate account creation", async function () {
             const appId = "test-app";
             const projectId = "project-001";
             const metadata ="ipfs://Qm...";
@@ -237,16 +237,16 @@ describe("SmartEscrow System", function () {
             const pviumSignature = await pvium.signMessage(ethers.getBytes(pviumMessageHash));
 
             // First creation succeeds
-            await factory.createProject(payload, appSignature, pviumSignature);
+            await factory.createAccount(payload, appSignature, pviumSignature);
 
             // Second creation fails
             await expect(
-                factory.createProject(payload, appSignature, pviumSignature)
-            ).to.be.revertedWith("Project exists");
+                factory.createAccount(payload, appSignature, pviumSignature)
+            ).to.be.revertedWith("Account exists");
         });
     });
 
-    async function createTestProject(
+    async function createTestAccount(
         appId: string,
         projectId: string,
         tokenAddress: string,
@@ -306,61 +306,61 @@ describe("SmartEscrow System", function () {
         );
         const pviumSignature = await pvium.signMessage(ethers.getBytes(pviumMessageHash));
 
-        await factory.createProject(payload, appSignature, pviumSignature);
+        await factory.createAccount(payload, appSignature, pviumSignature);
 
-        return await factory.getProjectByUniqueId(appId, projectId);
+        return await factory.getAccountByUniqueId(appId, projectId);
     }
 
-    describe("Project Funding and Activation", function () {
-        let projectAddress: string;
-        let project: SmartEscrow;
+    describe("Account Funding and Activation", function () {
+        let accountAddress: string;
+        let account: SmartEscrow;
 
         beforeEach(async function () {
-            projectAddress = await createTestProject(
+            accountAddress = await createTestAccount(
                 "test-app",
                 "project-001",
                 await mockUSDC.getAddress()
             );
-            project = await ethers.getContractAt("SmartEscrow", projectAddress);
+            account = await ethers.getContractAt("SmartEscrow", accountAddress);
         });
 
-        it("Should allow funding the project", async function () {
+        it("Should allow funding the account", async function () {
             const fundAmount = ethers.parseUnits("1000", 6);
 
-            await mockUSDC.connect(projectOwner).approve(projectAddress, fundAmount);
+            await mockUSDC.connect(projectOwner).approve(accountAddress, fundAmount);
 
-            await expect(project.connect(projectOwner).fundProject(fundAmount))
-                .to.emit(project, "ProjectFunded")
+            await expect(account.connect(projectOwner).fundProject(fundAmount))
+                .to.emit(account, "ProjectFunded")
                 .withArgs(projectOwner.address, fundAmount);
 
-            expect(await mockUSDC.balanceOf(projectAddress)).to.equal(fundAmount);
+            expect(await mockUSDC.balanceOf(accountAddress)).to.equal(fundAmount);
         });
 
         it("Should reject zero amount funding", async function () {
             await expect(
-                project.connect(projectOwner).fundProject(0)
+                account.connect(projectOwner).fundProject(0)
             ).to.be.revertedWith("Amount must be greater than 0");
         });
 
         it("Should allow adding vendors before activation", async function () {
             const vendors = [vendor1.address, vendor2.address];
 
-            await expect(project.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG))
-                .to.emit(project, "VendorsAdded")
+            await expect(account.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG))
+                .to.emit(account, "VendorsAdded")
                 .withArgs(vendors);
 
-            expect(await project.approvedVendors(vendor1.address)).to.be.true;
-            expect(await project.approvedVendors(vendor2.address)).to.be.true;
-            expect(await project.getVendorCount()).to.equal(2);
+            expect(await account.approvedVendors(vendor1.address)).to.be.true;
+            expect(await account.approvedVendors(vendor2.address)).to.be.true;
+            expect(await account.getVendorCount()).to.equal(2);
         });
 
         it("Should allow adding vendors with valid relayed signature", async function () {
             const vendors = [vendor1.address, vendor2.address];
             const nonce = 1; // Must be > 0 for relayed calls
 
-            // Get project details
-            const appId = await project.appId();
-            const projectId = await project.projectId();
+            // Get account details
+            const appId = await account.appId();
+            const projectId = await account.projectId();
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             // Create payload for addVendors
@@ -384,24 +384,24 @@ describe("SmartEscrow System", function () {
             };
 
             // Relayer submits the transaction
-            await expect(project.connect(relayer).addVendors(vendors, callSig))
-                .to.emit(project, "VendorsAdded")
+            await expect(account.connect(relayer).addVendors(vendors, callSig))
+                .to.emit(account, "VendorsAdded")
                 .withArgs(vendors);
 
-            expect(await project.approvedVendors(vendor1.address)).to.be.true;
-            expect(await project.approvedVendors(vendor2.address)).to.be.true;
-            expect(await project.getVendorCount()).to.equal(2);
+            expect(await account.approvedVendors(vendor1.address)).to.be.true;
+            expect(await account.approvedVendors(vendor2.address)).to.be.true;
+            expect(await account.getVendorCount()).to.equal(2);
 
             // Verify nonce was consumed
-            expect(await project.consumedNonce(relayer.address, nonce)).to.be.true;
+            expect(await account.consumedNonce(relayer.address, nonce)).to.be.true;
         });
 
         it("Should reject adding vendors with invalid signature", async function () {
             const vendors = [vendor1.address, vendor2.address];
             const nonce = 1;
 
-            const appId = await project.appId();
-            const projectId = await project.projectId();
+            const appId = await account.appId();
+            const projectId = await account.projectId();
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             const payload = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -425,7 +425,7 @@ describe("SmartEscrow System", function () {
             };
 
             await expect(
-                project.connect(relayer).addVendors(vendors, callSig)
+                account.connect(relayer).addVendors(vendors, callSig)
             ).to.be.revertedWith("Invalid app admin signature");
         });
 
@@ -433,8 +433,8 @@ describe("SmartEscrow System", function () {
             const vendors = [vendor1.address];
             const nonce = 1;
 
-            const appId = await project.appId();
-            const projectId = await project.projectId();
+            const appId = await account.appId();
+            const projectId = await account.projectId();
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             const payload = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -457,11 +457,11 @@ describe("SmartEscrow System", function () {
             };
 
             // First call succeeds
-            await project.connect(relayer).addVendors(vendors, callSig);
+            await account.connect(relayer).addVendors(vendors, callSig);
 
             // Second call with same nonce and same payload fails (nonce consumed)
             await expect(
-                project.connect(relayer).addVendors(vendors, callSig)
+                account.connect(relayer).addVendors(vendors, callSig)
             ).to.be.revertedWith("Nonce already consumed");
         });
 
@@ -470,8 +470,8 @@ describe("SmartEscrow System", function () {
             const wrongVendors = [vendor2.address];
             const nonce = 1;
 
-            const appId = await project.appId();
-            const projectId = await project.projectId();
+            const appId = await account.appId();
+            const projectId = await account.projectId();
             const chainId = (await ethers.provider.getNetwork()).chainId;
 
             // Sign for one set of vendors
@@ -496,7 +496,7 @@ describe("SmartEscrow System", function () {
 
             // Try to call with different vendors (payload mismatch)
             await expect(
-                project.connect(relayer).addVendors(wrongVendors, callSig)
+                account.connect(relayer).addVendors(wrongVendors, callSig)
             ).to.be.revertedWith("Invalid app admin signature");
         });
 
@@ -506,17 +506,17 @@ describe("SmartEscrow System", function () {
             const requiredBalance = minBalance * BigInt(vendors.length);
 
             // Add vendors
-            await project.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
+            await account.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
 
             // Fund project
-            await mockUSDC.connect(projectOwner).approve(projectAddress, requiredBalance);
-            await project.connect(projectOwner).fundProject(requiredBalance);
+            await mockUSDC.connect(projectOwner).approve(accountAddress, requiredBalance);
+            await account.connect(projectOwner).fundProject(requiredBalance);
 
             // Activate
-            await expect(project.connect(appOwner).activateProject(EMPTY_CALL_SIG))
-                .to.emit(project, "ProjectActivated");
+            await expect(account.connect(appOwner).activateProject(EMPTY_CALL_SIG))
+                .to.emit(account, "ProjectActivated");
 
-            expect(await project.isActive()).to.be.true;
+            expect(await account.isActive()).to.be.true;
         });
 
         it("Should reject activation with insufficient balance", async function () {
@@ -524,12 +524,12 @@ describe("SmartEscrow System", function () {
             const vendors = [vendor1.address, vendor2.address];
             const insufficientBalance = minBalance; // Only enough for 1 vendor
 
-            await project.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
-            await mockUSDC.connect(projectOwner).approve(projectAddress, insufficientBalance);
-            await project.connect(projectOwner).fundProject(insufficientBalance);
+            await account.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
+            await mockUSDC.connect(projectOwner).approve(accountAddress, insufficientBalance);
+            await account.connect(projectOwner).fundProject(insufficientBalance);
 
             await expect(
-                project.connect(appOwner).activateProject(EMPTY_CALL_SIG)
+                account.connect(appOwner).activateProject(EMPTY_CALL_SIG)
             ).to.be.revertedWith("Insufficient balance for activation");
         });
 
@@ -537,34 +537,34 @@ describe("SmartEscrow System", function () {
             const vendors = [vendor1.address];
             const minBalance = ethers.parseUnits("100", 6);
 
-            await project.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
-            await mockUSDC.connect(projectOwner).approve(projectAddress, minBalance);
-            await project.connect(projectOwner).fundProject(minBalance);
-            await project.connect(appOwner).activateProject(EMPTY_CALL_SIG);
+            await account.connect(appOwner).addVendors(vendors, EMPTY_CALL_SIG);
+            await mockUSDC.connect(projectOwner).approve(accountAddress, minBalance);
+            await account.connect(projectOwner).fundProject(minBalance);
+            await account.connect(appOwner).activateProject(EMPTY_CALL_SIG);
 
             await expect(
-                project.connect(appOwner).addVendors([vendor2.address], EMPTY_CALL_SIG)
+                account.connect(appOwner).addVendors([vendor2.address], EMPTY_CALL_SIG)
             ).to.be.revertedWith("Project already active");
         });
     });
 
     async function setupActiveProject(): Promise<{ project: SmartEscrow, projectAddress: string }> {
-        const projectAddress = await createTestProject(
+        const accountAddress = await createTestAccount(
             "test-app",
             "project-001",
             await mockUSDC.getAddress()
         );
-        const project = await ethers.getContractAt("SmartEscrow", projectAddress);
+        const project = await ethers.getContractAt("SmartEscrow", accountAddress);
 
         // Add vendors and activate
         await project.connect(appOwner).addVendors([vendor1.address, vendor2.address], EMPTY_CALL_SIG);
         const minBalance = ethers.parseUnits("100", 6);
         const requiredBalance = minBalance * 2n;
-        await mockUSDC.connect(projectOwner).approve(projectAddress, requiredBalance);
+        await mockUSDC.connect(projectOwner).approve(accountAddress, requiredBalance);
         await project.connect(projectOwner).fundProject(requiredBalance);
         await project.connect(appOwner).activateProject(EMPTY_CALL_SIG);
 
-        return { project, projectAddress };
+        return { project, projectAddress: accountAddress };
     }
 
     async function signClaim(
@@ -1185,14 +1185,14 @@ describe("SmartEscrow System", function () {
 
         beforeEach(async function () {
             // Create two projects with different tokens
-            projectUSDCAddress = await createTestProject(
+            projectUSDCAddress = await createTestAccount(
                 "test-app",
                 "usdc-project",
                 await mockUSDC.getAddress()
             );
             projectUSDC = await ethers.getContractAt("SmartEscrow", projectUSDCAddress);
 
-            projectUSDTAddress = await createTestProject(
+            projectUSDTAddress = await createTestAccount(
                 "test-app",
                 "usdt-project",
                 await mockUSDT.getAddress()
