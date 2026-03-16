@@ -10,7 +10,7 @@ import "./interfaces/IUniswapV3Router.sol";
 import "./interfaces/IWETH.sol";
 
 /**
- * @title UniversalDexRouter
+ * @title Pvium Protocol UniversalDexRouter
  * @dev A simplified routing contract for Uniswap V2/V3 and PancakeSwap
  * Deploy separately on each chain with the appropriate router address
  * Uses AccessControl for role-based permissions

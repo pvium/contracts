@@ -5,7 +5,9 @@
       "Bash(yarn add:*)",
       "Bash(mkdir:*)",
       "Bash(npx hardhat test:*)",
-      "WebFetch(domain:docs.base.org)"
+      "WebFetch(domain:docs.base.org)",
+      "Bash(npx hardhat compile)",
+      "Bash(npx hardhat compile --force)"
     ],
     "deny": [],
     "ask": []
