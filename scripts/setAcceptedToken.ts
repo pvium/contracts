@@ -2,7 +2,7 @@ import { ethers } from "hardhat";
 
 async function main() {
 //   const [routerArg, tokenArg, acceptedArg] = process.argv.slice(2);
-  const routerAddress = "0x98D94c61f9F580e9094dc970C5C38c3c218dF3a4"
+  const routerAddress = "0x36b248D633f8656E81B92f91f4666d452aB6C9F0"
   const tokenAddress = "0x7dCEd3bFcC97948a665BB665a5D7eEfdfce39C3A";
   const accepted = true;
 

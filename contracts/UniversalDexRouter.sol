@@ -245,8 +245,9 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         if (bytes(memo).length == 0) {
             revert EmptyMemo();
         }
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), tokenAmount);
 
-        IERC20(tokenAddress).safeTransferFrom(msg.sender, payeeAddress, tokenAmount);
+        IERC20(tokenAddress).safeTransfer(payeeAddress, tokenAmount);
 
         emit SwapExecuted(
             msg.sender,
