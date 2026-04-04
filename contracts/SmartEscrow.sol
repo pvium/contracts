@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -7,23 +7,17 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/ISmartEscrowFactory.sol";
+import "hardhat/console.sol";
 
 /**
- * @title Project
- * @notice Individual escrow project for managing vendor payments
- * @dev Handles funding, vendor management, payouts, disputes, and fee distribution
+ * @title Account
+ * @notice Individual escrow project for managing receiver payments
+ * @dev Handles funding, receiver management, payouts, disputes, and fee distribution
  */
 contract SmartEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
-
-    
-    // Structs
-    struct CallSignature {
-        uint256 nonce;
-        bytes signature;
-    }
 
     struct DeploymentParams {
         address factory;
@@ -36,10 +30,9 @@ contract SmartEscrow is ReentrancyGuard {
         uint256 pviumFeeBps;
         uint256 disputeWindowSeconds;
         uint256 lockDurationSeconds;
-        uint256 minimumBalancePerVendor;
-        uint256 maxNumVendors;
-        address appFeeAddress;
-        address appAdminAddress;
+        uint256 basePayout;
+        uint256 maxPayout;
+        uint256 maxNumReceivers;
     }
 
     struct CreateSmartEscrowPayload {
@@ -48,16 +41,16 @@ contract SmartEscrow is ReentrancyGuard {
         string metadata;
         address tokenAddress;
         address refundAddress;
-        address appFeeAddress;
-        address appAdminAddress;
         uint256 appFeeBps;
         uint256 disputeWindowSeconds;
         uint256 lockDurationSeconds;
-        uint256 minimumBalancePerVendor;
-        uint256 maxNumVendors;
+        uint256 basePayout;
+        uint256 maxPayout;
+        uint256 maxNumReceivers;
+        uint256 timestamp;
     }
 
-    struct VendorPayoutPayload {
+    struct ReceiverPayoutPayload {
         string app;
         string projectId;
         bytes32 claimId;
@@ -69,7 +62,7 @@ contract SmartEscrow is ReentrancyGuard {
     }
 
     struct FinalizedClaim {
-        address vendor;
+        address receiver;
         uint256 amount;
         uint256 finalizedAt;
         bool claimed;
@@ -85,62 +78,66 @@ contract SmartEscrow is ReentrancyGuard {
     // State variables
     string public appId;
     string public projectId;
-    address public factory;
-    address public appFeeAddress;
+    ISmartEscrowFactory public factory;
     address public refundAddress;
     IERC20 public token;
     string public metadata;
-    mapping(address => mapping(uint256 => bool)) public consumedNonce;
-    mapping(address => bool) public appAdmins;
-    mapping(address => bool) public historicAdmins; // Override for compromized app platform keys.
 
     uint256 public appFeeBps;
     uint256 public pviumFeeBps;
     uint256 public disputeWindowSeconds;
     uint256 public lockDurationSeconds;
-    uint256 public minimumBalancePerVendor;
-    uint256 public maxNumVendors;
+    uint256 public basePayout;
+    uint256 public maxPayout;
+    uint256 public maxNumReceivers;
 
     bool public isActive;
-    bool public isEnded;
+    uint256 public createdAt;
+    uint256 public activatedAt;
 
-    // Vendor management
-    mapping(address => bool) public approvedVendors;
-    address[] public vendorList;
+    // Receiver management
+    mapping(address => bool) public approvedReceivers;
+    address[] public receiverList;
 
     // Claim tracking
     mapping(bytes32 => FinalizedClaim) public finalizedClaims;
     mapping(bytes32 => bool) public cancelledClaims;
     mapping(bytes32 => Dispute) public disputes;
 
-    // Nonces for replay protection
-    mapping(address => uint256) public nonces;
+    // Receiver payment tracking
+    mapping(address => uint256) public totalPaidToReceiver; // Track cumulative payments per receiver
+    mapping(address => bool) public receiverBanned; // Ban status
+    mapping(address => uint256) public receiverEmergencyWithdrawnAmount; // Track emergency withdrawal amounts
+
+    bytes32 appIdBytes;
 
     // Events
-    event ProjectCreated(
+    event AccountCreated(
         string appId,
         address tokenAddress,
         uint256 appFeeBps,
         uint256 pviumFeeBps
     );
-    event ProjectFunded(address indexed funder, uint256 amount);
-    event VendorsAdded(address[] vendors);
-    event ProjectActivated(uint256 timestamp);
+    event AccountFunded(address indexed funder, uint256 amount);
+    event ReceiversAdded(address[] receivers);
+    event AccountActivated(uint256 timestamp);
     event ClaimFinalized(
         bytes32 indexed claimId,
-        address indexed vendor,
-        uint256 vendorAmount,
+        address indexed receiver,
+        uint256 receiverAmount,
         uint256 appFee,
         uint256 pviumFee
     );
 
     event DisputeRaised(bytes32 indexed claimId, address indexed raisedBy);
     event DisputeResolved(bytes32 indexed claimId, bool allowed);
-    event ProjectEnded(string reason, uint256 timestamp);
-    event AppAdminUpdated(address indexed admin, bool status);
-
-     // Define roles
-    bytes32 public constant PVIUM_ADMIN_ROLE = keccak256("PVIUM_ADMIN_ROLE");
+    event BasePayWithdrawal(address indexed receiver, uint256 amount);
+    event SurplusWithdrawn(address indexed refundAddress, uint256 amount);
+    event ReceiverBanned(
+        address indexed receiver,
+        bool banned,
+        uint256 timestamp
+    );
 
     /**
      * @notice Constructor
@@ -156,23 +153,22 @@ contract SmartEscrow is ReentrancyGuard {
         uint256 _pviumFeeBps,
         uint256 _disputeWindowSeconds,
         uint256 _lockDuration,
-        uint256 _minimumBalancePerVendor,
-        uint256 _maxNumVendors,
-        address _appFeeAddress,
-        address _appAdminAddress
+        uint256 _basePayout,
+        uint256 _maxPayout,
+        uint256 _maxNumReceivers
     ) {
-        require(_factory != address(0), "Invalid factory address");
         require(_tokenAddress != address(0), "Invalid token address");
-        require(_appFeeAddress != address(0), "Invalid app address");
         require(_refundAddress != address(0), "Invalid refund address");
-        require(
-            _appFeeBps + _pviumFeeBps <= 10000,
-            "Total fees exceed 100%"
-        );
-        require(_maxNumVendors > 0, "Max vendors must be > 0");
+        require(_appFeeBps + _pviumFeeBps <= 10000, "Total fees exceed 100%");
+        require(_maxNumReceivers > 0, "Max receivers must be > 0");
+        require(_maxPayout >= _basePayout, "Max payout must be >= base payout");
+        require(_basePayout > 0, "Base payout must be > 0");
 
-        factory = _factory;
+        factory = ISmartEscrowFactory(_factory);
         appId = _appId;
+        appIdBytes = keccak256(abi.encode(appId));
+        console.log("SmartEscrow constructor:");
+        console.logBytes32(appIdBytes);
         projectId = _projectId;
         metadata = _metadata;
         token = IERC20(_tokenAddress);
@@ -181,73 +177,45 @@ contract SmartEscrow is ReentrancyGuard {
         pviumFeeBps = _pviumFeeBps;
         disputeWindowSeconds = _disputeWindowSeconds;
         lockDurationSeconds = _lockDuration;
-        minimumBalancePerVendor = _minimumBalancePerVendor;
-        maxNumVendors = _maxNumVendors;
-        appFeeAddress = _appFeeAddress;
+        basePayout = _basePayout;
+        maxPayout = _maxPayout;
+        maxNumReceivers = _maxNumReceivers;
 
-        // Set initial app admin
-        appAdmins[_appAdminAddress] = true;
-        historicAdmins[_appAdminAddress] = true;
+        createdAt = block.timestamp;
 
-        emit ProjectCreated(_appId, _tokenAddress, _appFeeBps, _pviumFeeBps);
+        emit AccountCreated(_appId, _tokenAddress, _appFeeBps, _pviumFeeBps);
     }
 
     // Modifiers
-    modifier onlyApp(CallSignature calldata callSig, bytes memory payloadData) {
-        if(callSig.signature.length == 0) {
-            // Direct call - must be from an app admin
-            require(appAdmins[msg.sender], "Only app admin can make this call");
-        } else {
-            // Relayed call with signature
-            require(callSig.nonce > 0, "Nonce cannot be 0");
-            require(!consumedNonce[msg.sender][callSig.nonce], "Nonce already consumed");
-
-            // Verify app signature
-            bytes32 messageHash = keccak256(
-                abi.encode(
-                    appId,
-                    projectId,
-                    payloadData,
-                    callSig.nonce,
-                    block.chainid
-                )
-            );
-            bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
-            address signer = ethSignedMessageHash.recover(callSig.signature);
-
-            require(appAdmins[signer] || (historicAdmins[signer] && ISmartEscrowFactory(factory).hasRole(PVIUM_ADMIN_ROLE, msg.sender)), "Invalid app admin signature");
-
-            // Consume nonce after verification
-            consumedNonce[msg.sender][callSig.nonce] = true;
-        }
+    modifier onlyAppAdmin(
+        CallSignature calldata callSig,
+        bytes memory payloadData
+    ) {
+        factory.validateAppAdmin(appIdBytes, msg.sender, callSig, payloadData);
         _;
     }
 
     modifier onlyFactory() {
-        require(msg.sender == factory, "Only factory");
+        require(msg.sender == address(factory), "Only factory");
         _;
     }
 
     modifier onlyFactoryOrApp() {
         require(
-            msg.sender == factory || msg.sender == appFeeAddress,
+            msg.sender == address(factory) ||
+                factory.appAdmins(appIdBytes, msg.sender),
             "Only factory or app"
         );
         _;
     }
 
     modifier beforeActivation() {
-        require(!isActive, "Project already active");
+        require(!isActive, "Account already active");
         _;
     }
 
     modifier afterActivation() {
-        require(isActive, "Project not active");
-        _;
-    }
-
-    modifier notEnded() {
-        require(!isEnded, "Project ended");
+        require(isActive, "Account not active");
         _;
     }
 
@@ -255,48 +223,70 @@ contract SmartEscrow is ReentrancyGuard {
      * @notice Fund the project with ERC20 tokens
      * @param amount Amount of tokens to deposit
      */
-    function fundProject(uint256 amount) external nonReentrant notEnded {
+    function fundAccount(uint256 amount) external nonReentrant {
         require(amount > 0, "Amount must be greater than 0");
 
         token.safeTransferFrom(msg.sender, address(this), amount);
 
-        emit ProjectFunded(msg.sender, amount);
+        emit AccountFunded(msg.sender, amount);
     }
 
     /**
-     * @notice Add approved vendors to the project
-     * @param vendors Array of vendor addresses
+     * @notice Add approved receivers to the project
+     * @param receivers Array of receiver addresses
      */
-    function addVendors(address[] calldata vendors, CallSignature calldata signature)
+    function addReceivers(
+        address[] calldata receivers,
+        CallSignature calldata signature
+    )
         external
-        onlyApp(signature, abi.encode("addVendors", vendors))
+        onlyAppAdmin(
+            signature,
+            abi.encode(projectId, "addReceivers", receivers)
+        )
         beforeActivation
-        notEnded
     {
-        require(vendors.length > 0, "No vendors provided");
+        require(receivers.length > 0, "No receivers provided");
         require(
-            vendorList.length + vendors.length <= maxNumVendors,
-            "Exceeds max vendors"
+            receiverList.length + receivers.length <= maxNumReceivers,
+            "Exceeds max receivers"
         );
 
-        for (uint256 i = 0; i < vendors.length; i++) {
-            require(vendors[i] != address(0), "Invalid vendor address");
-            require(!approvedVendors[vendors[i]], "Vendor already added");
+        for (uint256 i = 0; i < receivers.length; i++) {
+            require(receivers[i] != address(0), "Invalid receiver address");
+            require(!approvedReceivers[receivers[i]], "Receiver already added");
 
-            approvedVendors[vendors[i]] = true;
-            vendorList.push(vendors[i]);
+            approvedReceivers[receivers[i]] = true;
+            receiverList.push(receivers[i]);
         }
 
-        emit VendorsAdded(vendors);
+        emit ReceiversAdded(receivers);
     }
 
     /**
-     * @notice Activate the project, locking funds and vendor list
+     * @notice Activate the project, locking funds and receiver list
+     * @dev Ensures contract has enough balance for worst-case scenario:
+     *      All receivers get maxPayout during active period + fees are paid from contract balance
+     *      Fees are NOT deducted from vendor payouts - vendors receive the full promised amount
      */
-    function activateProject(CallSignature calldata signature) external onlyApp(signature,  abi.encode("activateProject")) beforeActivation notEnded {
-        require(vendorList.length > 0, "No vendors added");
+    function activateAccount(
+        CallSignature calldata signature
+    )
+        external
+        onlyAppAdmin(signature, abi.encode(projectId, "activateAccount"))
+        beforeActivation
+    {
 
-        uint256 requiredBalance = minimumBalancePerVendor * vendorList.length;
+        require(receiverList.length > 0, "No receivers added");
+
+        // Calculate required balance: maxPayout per receiver + fees
+        // During active period, vendors receive full payment.amount, fees paid separately from contract balance
+        // After lock expiry, emergency withdrawal pays basePayout (no fees)
+        uint256 totalMaxPayout = maxPayout * receiverList.length;
+        uint256 totalFees = (totalMaxPayout * (appFeeBps + pviumFeeBps)) /
+            10000;
+        uint256 requiredBalance = totalMaxPayout + totalFees;
+
         uint256 currentBalance = token.balanceOf(address(this));
 
         require(
@@ -305,36 +295,47 @@ contract SmartEscrow is ReentrancyGuard {
         );
 
         isActive = true;
+        activatedAt = block.timestamp;
 
-        emit ProjectActivated(block.timestamp);
+        emit AccountActivated(block.timestamp);
     }
 
     /**
-     * @notice Batch finalize approved vendor payouts (only callable by factory)
-     * @param vendorPayments Array of payout claims
+     * @notice Batch finalize approved receiver payouts (only callable by factory)
+     * @dev Vendors receive the full payment.amount (no fee deductions)
+     * @dev Fees are paid separately from the contract balance
+     * @param receiverPayments Array of payout claims
      * @return totalAppFees Total app fees accumulated for this batch
      * @return totalPviumFees Total Pvium fees accumulated for this batch
      */
     function finalizeClaim(
-        VendorPayoutPayload[] calldata vendorPayments
-    ) public nonReentrant onlyFactory afterActivation returns (uint256 totalAppFees, uint256 totalPviumFees) {
-        require(vendorPayments.length > 0, "No payments provided");
+        ReceiverPayoutPayload[] calldata receiverPayments
+    )
+        public
+        nonReentrant
+        onlyFactory
+        afterActivation
+        returns (uint256 totalAppFees, uint256 totalPviumFees)
+    {
+        require(receiverPayments.length > 0, "No payments provided");
 
-
-        for (uint256 i = 0; i < vendorPayments.length; i++) {
-            (uint256 receiverAmount, uint256 appFee, uint256 pviumFee) =
-                _validatePayout(vendorPayments[i]);
+        for (uint256 i = 0; i < receiverPayments.length; i++) {
+            (
+                uint256 receiverAmount,
+                uint256 appFee,
+                uint256 pviumFee
+            ) = _validatePayout(receiverPayments[i]);
 
             // Transfer to receiver immediately
-            token.safeTransfer(vendorPayments[i].receiver, receiverAmount);
+            token.safeTransfer(receiverPayments[i].receiver, receiverAmount);
 
             // Accumulate fees
             totalAppFees += appFee;
             totalPviumFees += pviumFee;
 
             emit ClaimFinalized(
-                vendorPayments[i].claimId,
-                vendorPayments[i].receiver,
+                receiverPayments[i].claimId,
+                receiverPayments[i].receiver,
                 receiverAmount,
                 appFee,
                 pviumFee
@@ -343,12 +344,12 @@ contract SmartEscrow is ReentrancyGuard {
 
         // Transfer app fees to factory (factory will handle distribution per token)
         if (totalAppFees > 0) {
-            token.safeTransfer(factory, totalAppFees);
+            token.safeTransfer(address(factory), totalAppFees);
         }
 
         // Transfer Pvium fees to factory (factory will handle distribution per token)
         if (totalPviumFees > 0) {
-            token.safeTransfer(factory, totalPviumFees);
+            token.safeTransfer(address(factory), totalPviumFees);
         }
 
         return (totalAppFees, totalPviumFees);
@@ -356,26 +357,41 @@ contract SmartEscrow is ReentrancyGuard {
 
     /**
      * @notice Validate payout and return amounts (doesn't transfer)
-     * @return receiverAmount Amount to send to receiver
-     * @return appFee App fee amount
-     * @return pviumFee Pvium fee amount
+     * @dev Receiver gets full payment.amount, fees are additional costs from contract balance
+     * @return receiverAmount Full amount to send to receiver (= payment.amount)
+     * @return appFee App fee amount (paid from contract balance, NOT deducted from receiverAmount)
+     * @return pviumFee Pvium fee amount (paid from contract balance, NOT deducted from receiverAmount)
      */
-    function _validatePayout(VendorPayoutPayload calldata payment)
+    function _validatePayout(
+        ReceiverPayoutPayload calldata payment
+    )
         private
         returns (uint256 receiverAmount, uint256 appFee, uint256 pviumFee)
     {
         bytes32 claimId = payment.claimId;
 
-        // Determine if this is a refund or vendor payment
+        // Determine if this is a refund or receiver payment
         bool isRefund = payment.receiver == refundAddress;
 
         // Validate receiver
         if (isRefund) {
-            // Refund to project owner - no vendor check needed
-            require(payment.receiver == refundAddress, "Invalid refund address");
+            // Refund to project owner - no receiver check needed
+            require(
+                payment.receiver == refundAddress,
+                "Invalid refund address"
+            );
         } else {
-            // Payment to vendor - must be approved
-            require(approvedVendors[payment.receiver], "Receiver not approved");
+            // Payment to receiver - must be approved and not banned
+            require(
+                approvedReceivers[payment.receiver],
+                "Receiver not approved"
+            );
+            require(!receiverBanned[payment.receiver], "Receiver is banned");
+
+            // Check total payout cap (only for non-refunds)
+            uint256 newTotal = totalPaidToReceiver[payment.receiver] +
+                payment.amount;
+            require(newTotal <= maxPayout, "Exceeds max receiver payout");
         }
 
         // Check if claim is permanently cancelled
@@ -386,13 +402,9 @@ contract SmartEscrow is ReentrancyGuard {
 
         // Check if claim is actively disputed
         if (disputes[claimId].active) {
-            // If dispute deadline has passed, auto-clear it
-            if (block.timestamp > disputes[claimId].deadline) {
-                delete disputes[claimId];
-            } else {
-                // Dispute still active
-                revert("Claim is disputed");
-            }
+            // If dispute deadline has passed, claim remains blocked until explicitly resolved
+            // This prevents auto-approval of disputed claims due to platform inaction
+            revert("Claim is disputed");
         }
 
         // Time-based validation
@@ -411,47 +423,35 @@ contract SmartEscrow is ReentrancyGuard {
 
         // Verify this payment is for this project
         require(
-            keccak256(abi.encodePacked(payment.app)) == keccak256(abi.encodePacked(appId)),
+            keccak256(abi.encode(payment.app)) == keccak256(abi.encode(appId)),
             "Payment app mismatch"
         );
         require(
-            keccak256(abi.encodePacked(payment.projectId)) == keccak256(abi.encodePacked(projectId)),
+            keccak256(abi.encode(payment.projectId)) ==
+                keccak256(abi.encode(projectId)),
             "Payment project mismatch"
         );
 
-        // Verify app signature
-        bytes32 messageHash = keccak256(
-            abi.encode(
-                payment.app,
-                payment.projectId,
-                payment.claimId,
-                payment.receiver,
-                payment.amount,
-                payment.claimableAfter,
-                payment.claimDeadline,
-                nonces[payment.receiver]
-            )
-        );
-        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
-        address signer = ethSignedMessageHash.recover(payment.appSignature);
-        require(signer == appFeeAddress, "Invalid app signature");
-
-        // Calculate fees
+        require(verifyPayoutSignature(payment), "Invalid payout signer");
+        // Calculate fees - fees are taken from contract balance, NOT deducted from vendor payout
+        // Vendor receives the full payment.amount as promised
+        receiverAmount = payment.amount;
         appFee = (payment.amount * appFeeBps) / 10000;
         // No Pvium fee on refunds
         pviumFee = isRefund ? 0 : (payment.amount * pviumFeeBps) / 10000;
-        receiverAmount = payment.amount - appFee - pviumFee;
 
         // Mark claim as finalized
         finalizedClaims[claimId] = FinalizedClaim({
-            vendor: payment.receiver,
+            receiver: payment.receiver,
             amount: payment.amount,
             finalizedAt: block.timestamp,
             claimed: true
         });
 
-        // Increment nonce
-        nonces[payment.receiver]++;
+        // Track total paid to receiver (only for non-refunds)
+        if (!isRefund && approvedReceivers[payment.receiver]) {
+            totalPaidToReceiver[payment.receiver] += payment.amount;
+        }
 
         return (receiverAmount, appFee, pviumFee);
     }
@@ -459,25 +459,23 @@ contract SmartEscrow is ReentrancyGuard {
     /**
      * @notice Raise a dispute for a claim
      * @param claimId Claim identifier
-     * @param signature Signature from either vendor or app authorizing the dispute
+     * @param signature Signature from either receiver or app authorizing the dispute
      */
     function dispute(
         bytes32 claimId,
         bytes calldata signature
-    ) external afterActivation notEnded {
+    ) external afterActivation {
         require(!cancelledClaims[claimId], "Claim already cancelled");
         require(!finalizedClaims[claimId].claimed, "Already claimed");
         require(!disputes[claimId].active, "Already disputed");
 
-        // Verify signature - must be signed by app or approved vendor
-        bytes32 messageHash = keccak256(
-            abi.encode(claimId, block.chainid)
-        );
+        // Verify signature - must be signed by app or approved receiver
+        bytes32 messageHash = keccak256(abi.encode(claimId, block.chainid));
         bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
         address signer = ethSignedMessageHash.recover(signature);
 
         require(
-            signer == appFeeAddress || approvedVendors[signer],
+            factory.appAdmins(appIdBytes, signer) || approvedReceivers[signer],
             "Invalid dispute signature"
         );
 
@@ -503,7 +501,7 @@ contract SmartEscrow is ReentrancyGuard {
         bool allowClaim,
         bytes calldata appSignature,
         bytes calldata pviumSignature
-    ) external nonReentrant afterActivation notEnded {
+    ) external nonReentrant afterActivation {
         require(disputes[claimId].active, "No active dispute");
 
         // Verify signatures
@@ -515,8 +513,14 @@ contract SmartEscrow is ReentrancyGuard {
         address appSigner = ethSignedMessageHash.recover(appSignature);
         address pviumSigner = ethSignedMessageHash.recover(pviumSignature);
 
-        require(appSigner == appFeeAddress, "Invalid app signature");
-        require(pviumSigner == pviumFeeAddress(), "Invalid Pvium signature");
+        require(
+            factory.appAdmins(appIdBytes, appSigner),
+            "Invalid app signature"
+        );
+        require(
+            factory.isRelayer(pviumSigner),
+            "Invalid relay signature"
+        );
 
         // Clear dispute
         delete disputes[claimId];
@@ -530,39 +534,94 @@ contract SmartEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice End the project and distribute remaining funds
-     * @param reason Reason for ending the project
+     * @notice Ban or unban a receiver from receiving payments (only before lock expiry)
+     * @param receiver Address to ban/unban
+     * @param banned True to ban, false to unban
      */
-    function endProject(string calldata reason, CallSignature calldata signature)
+    function banReceiver(
+        address receiver,
+        bool banned,
+        CallSignature calldata signature
+    )
         external
-        onlyApp(signature, abi.encode("endProject", reason))
+        onlyAppAdmin(
+            signature,
+            abi.encode(projectId, "banReceiver", receiver, banned)
+        )
         afterActivation
-        notEnded
     {
-        isEnded = true;
+        require(
+            block.timestamp < activatedAt + lockDurationSeconds,
+            "Cannot ban/unban after lock expiry"
+        );
+        require(approvedReceivers[receiver], "Receiver not approved");
+        require(receiverBanned[receiver] != banned, "Ban status unchanged");
 
-        emit ProjectEnded(reason, block.timestamp);
+        receiverBanned[receiver] = banned;
+        emit ReceiverBanned(receiver, banned, block.timestamp);
     }
 
     /**
-     * @notice Set or revoke app admin status
-     * @dev Only existing app admins can add/remove other admins
-     * @param admin Address to update
-     * @param status True to grant admin rights, false to revoke
+     * @notice Settle all unpaid receivers and return surplus after lock duration expires
+     * @dev Can be called by anyone - automatically pays receivers who received $0 their basePayout
+     * @dev After paying eligible receivers, remaining balance goes to refundAddress
+     * @dev Only pays receivers who: 1) received nothing during active period, 2) are not banned
      */
-    function setAppAdmin(address admin, bool status, CallSignature calldata signature)
-        external
-        onlyApp(signature, abi.encode("setAppAdmin", admin, status))
-        notEnded
-    {
-        require(admin != address(0), "Invalid admin address");
-        require(appAdmins[admin] != status, "Admin status unchanged");
+    function withdraw() external nonReentrant afterActivation {
+        require(activatedAt > 0, "Account not activated");
+        require(
+            block.timestamp >= activatedAt + lockDurationSeconds,
+            "Lock duration not expired"
+        );
 
-        appAdmins[admin] = status;
-        if(status) {
-             historicAdmins[admin] = true;
+        uint256 balance = token.balanceOf(address(this));
+        if (balance == 0) {
+            return; // Idempotent: no-op if no funds available
         }
-        emit AppAdminUpdated(admin, status);
+
+        // Step 1: Pay receivers who received $0 during active period
+        for (uint256 i = 0; i < receiverList.length; i++) {
+            address receiver = receiverList[i];
+
+            // Skip banned receivers
+            if (receiverBanned[receiver]) {
+                continue;
+            }
+
+            // Skip receivers who were paid during active period
+            if (totalPaidToReceiver[receiver] > 0) {
+                continue;
+            }
+
+            // Skip receivers who already withdrew via this function
+            if (receiverEmergencyWithdrawnAmount[receiver] > 0) {
+                continue;
+            }
+
+            // Calculate withdrawal amount (capped by remaining balance)
+            uint256 currentBalance = token.balanceOf(address(this));
+            if (currentBalance == 0) {
+                break; // No more funds to distribute
+            }
+
+            uint256 withdrawAmount = basePayout;
+            if (withdrawAmount > currentBalance) {
+                withdrawAmount = currentBalance;
+            }
+
+            // Mark as withdrawn and transfer
+            receiverEmergencyWithdrawnAmount[receiver] = withdrawAmount;
+            token.safeTransfer(receiver, withdrawAmount);
+
+            emit BasePayWithdrawal(receiver, withdrawAmount);
+        }
+
+        // Step 2: Send remaining balance to refundAddress
+        uint256 remainingBalance = token.balanceOf(address(this));
+        if (remainingBalance > 0) {
+            token.safeTransfer(refundAddress, remainingBalance);
+            emit SurplusWithdrawn(refundAddress, remainingBalance);
+        }
     }
 
     // View functions
@@ -584,23 +643,20 @@ contract SmartEscrow is ReentrancyGuard {
     /**
      * @notice Get finalized claim details
      */
-    function getFinalizedClaim(bytes32 claimId)
+    function getFinalizedClaim(
+        bytes32 claimId
+    )
         external
         view
         returns (
-            address vendor,
+            address receiver,
             uint256 amount,
             uint256 finalizedAt,
             bool claimed
         )
     {
         FinalizedClaim memory claim = finalizedClaims[claimId];
-        return (
-            claim.vendor,
-            claim.amount,
-            claim.finalizedAt,
-            claim.claimed
-        );
+        return (claim.receiver, claim.amount, claim.finalizedAt, claim.claimed);
     }
 
     /**
@@ -613,7 +669,9 @@ contract SmartEscrow is ReentrancyGuard {
     /**
      * @notice Get dispute details
      */
-    function getDispute(bytes32 claimId)
+    function getDispute(
+        bytes32 claimId
+    )
         external
         view
         returns (
@@ -633,17 +691,17 @@ contract SmartEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Get all approved vendors
+     * @notice Get all approved receivers
      */
-    function getVendors() external view returns (address[] memory) {
-        return vendorList;
+    function getReceivers() external view returns (address[] memory) {
+        return receiverList;
     }
 
     /**
-     * @notice Get vendor count
+     * @notice Get receiver count
      */
-    function getVendorCount() external view returns (uint256) {
-        return vendorList.length;
+    function getReceiverCount() external view returns (uint256) {
+        return receiverList.length;
     }
 
     /**
@@ -661,14 +719,15 @@ contract SmartEscrow is ReentrancyGuard {
             uint256 _pviumFeeBps,
             uint256 _disputeWindowSeconds,
             uint256 _lockDuration,
-            uint256 _minimumBalancePerVendor,
-            uint256 _maxNumVendors,
+            uint256 _basePayout,
+            uint256 _maxPayout,
+            uint256 _maxNumReceivers,
             address _appFeeAddress,
             address _pviumFeeAddress,
-            bool _isActive,
+            uint _activatedAt,
             bool _isEnded,
             uint256 _balance,
-            address[] memory _vendors
+            address[] memory _receivers
         )
     {
         return (
@@ -680,27 +739,28 @@ contract SmartEscrow is ReentrancyGuard {
             pviumFeeBps,
             disputeWindowSeconds,
             lockDurationSeconds,
-            minimumBalancePerVendor,
-            maxNumVendors,
-            appFeeAddress,
+            basePayout,
+            maxPayout,
+            maxNumReceivers,
+            ISmartEscrowFactory(factory).appFeeAddress(appId),
             pviumFeeAddress(),
-            isActive,
-            isEnded,
+            activatedAt,
+            block.timestamp > activatedAt + lockDurationSeconds,
             token.balanceOf(address(this)),
-            vendorList
+            receiverList
         );
     }
 
     /**
      * @notice Verify a claim signature off-chain before submitting
-     * @dev Allows vendors to verify payment commitment without gas costs
+     * @dev Allows receivers to verify payment commitment without gas costs
      * @param payment The claim payload to verify
      * @return isValid Whether the signature is valid
-     * @return signer The address that signed the claim
      */
-    function verifyClaimSignature(
-        VendorPayoutPayload calldata payment
-    ) external view returns (bool isValid, address signer) {
+    function verifyPayoutSignature(
+        ReceiverPayoutPayload calldata payment
+    ) public view returns (bool isValid) {
+        // Verify payout signature
         bytes32 messageHash = keccak256(
             abi.encode(
                 payment.app,
@@ -709,14 +769,12 @@ contract SmartEscrow is ReentrancyGuard {
                 payment.receiver,
                 payment.amount,
                 payment.claimableAfter,
-                payment.claimDeadline,
-                nonces[payment.receiver]
+                payment.claimDeadline
             )
         );
         bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
-        signer = ethSignedMessageHash.recover(payment.appSignature);
-        isValid = (signer == appFeeAddress);
-
-        return (isValid, signer);
+        address signer = ethSignedMessageHash.recover(payment.appSignature);
+        // require(appAdmins[signer], "Invalid app signature");
+        return (factory.appAdmins(appIdBytes, signer));
     }
 }
