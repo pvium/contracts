@@ -30,7 +30,7 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     // Fee receiver address
     address public feeReceiver;
 
-    uint256 immutable  public maxFeeBps = 30; // Max fee in basis points (0.3%)
+    uint256 public immutable maxFeeBps = 30; // Max fee in basis points (0.3%)
 
     // Swap tracking
     struct SwapData {
@@ -85,13 +85,26 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         string memo;
     }
 
+    struct PayoutIntent {
+        address recipient;
+        uint256 amount;
+        address token;
+        string memo;
+    }
+
+    struct BatchPayoutSummary {
+        uint256 amountIn;
+        uint256 amountOut;
+        address[] path;
+    }
+
     // Input struct for V3 exact output single hop swaps
     struct SwapV3ExactOutputSingleParams {
         address tokenIn;
         address tokenOut;
         uint24 fee;
-        uint256 amountOut;           // Exact amount of output tokens desired
-        uint256 amountInMaximum;     // Maximum amount of input tokens willing to spend
+        uint256 amountOut; // Exact amount of output tokens desired
+        uint256 amountInMaximum; // Maximum amount of input tokens willing to spend
         address to;
         uint256 paymentAmount;
         uint256 deadline;
@@ -100,9 +113,9 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
 
     // Input struct for V3 exact output multi-hop swaps
     struct SwapV3ExactOutputMultiParams {
-        bytes path;                  // Encoded path (reversed for exact output)
-        uint256 amountOut;           // Exact amount of output tokens desired
-        uint256 amountInMaximum;     // Maximum amount of input tokens willing to spend
+        bytes path; // Encoded path (reversed for exact output)
+        uint256 amountOut; // Exact amount of output tokens desired
+        uint256 amountInMaximum; // Maximum amount of input tokens willing to spend
         address to;
         uint256 paymentAmount;
         uint256 deadline;
@@ -113,7 +126,7 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     struct SwapETHForExactTokensV3SingleParams {
         address tokenOut;
         uint24 fee;
-        uint256 amountOut;           // Exact amount of tokens desired
+        uint256 amountOut; // Exact amount of tokens desired
         address to;
         uint256 paymentAmount;
         uint256 deadline;
@@ -122,8 +135,8 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
 
     // Input struct for ETH to exact tokens V3 multi-hop
     struct SwapETHForExactTokensV3MultiParams {
-        bytes path;                  // Encoded path (reversed, starts with tokenOut)
-        uint256 amountOut;           // Exact amount of tokens desired
+        bytes path; // Encoded path (reversed, starts with tokenOut)
+        uint256 amountOut; // Exact amount of tokens desired
         address to;
         uint256 paymentAmount;
         uint256 deadline;
@@ -147,12 +160,18 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         uint256 paymentAmount,
         string memo
     );
-    event SwapFee(
+    event PaymentExecuted(
         address indexed sender,
-        uint256 indexed swapId,
-        uint256 fee
+        address indexed recipient,
+        address indexed token,
+        uint256 paymentAmount,
+        string memo
     );
-    event FeeReceiverUpdated(address indexed oldReceiver, address indexed newReceiver);
+    event SwapFee(address indexed sender, uint256 indexed swapId, uint256 fee);
+    event FeeReceiverUpdated(
+        address indexed oldReceiver,
+        address indexed newReceiver
+    );
 
     /**
      * @dev Constructor
@@ -188,7 +207,9 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
      * @dev Update fee receiver address (only admin)
      * @param newFeeReceiver New fee receiver address
      */
-    function setFeeReceiver(address newFeeReceiver) external onlyRole(ADMIN_ROLE) {
+    function setFeeReceiver(
+        address newFeeReceiver
+    ) external onlyRole(ADMIN_ROLE) {
         require(newFeeReceiver != address(0), "Invalid fee receiver address");
         address oldReceiver = feeReceiver;
         feeReceiver = newFeeReceiver;
@@ -202,10 +223,17 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapExactTokensForTokens(
         SwapV2Params calldata params
     ) external nonReentrant returns (uint256[] memory amounts) {
-        require(params.paymentAmount <= params.amountOutMin, "Payment amount exceeds minimum output");
+        require(
+            params.paymentAmount <= params.amountOutMin,
+            "Payment amount exceeds minimum output"
+        );
 
         // Transfer tokens from sender to this contract
-        IERC20(params.path[0]).safeTransferFrom(msg.sender, address(this), params.amountIn);
+        IERC20(params.path[0]).safeTransferFrom(
+            msg.sender,
+            address(this),
+            params.amountIn
+        );
 
         // Approve router to spend tokens
         IERC20(params.path[0]).safeIncreaseAllowance(router, params.amountIn);
@@ -220,10 +248,18 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         );
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOutMin, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOutMin,
+            params.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.path[params.path.length - 1], params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.path[params.path.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -235,7 +271,16 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             feeAmount
         );
 
-        emit SwapExecuted(msg.sender, params.to,  params.path[0], params.path[params.path.length - 1], params.amountIn, amounts[amounts.length - 1],  params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.path[0],
+            params.path[params.path.length - 1],
+            params.amountIn,
+            amounts[amounts.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -246,21 +291,29 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         SwapETHParams calldata params
     ) external payable nonReentrant returns (uint256[] memory amounts) {
         require(params.path[0] == WETH, "Path must start with WETH");
-        require(params.paymentAmount <= params.amountOutMin, "Payment amount exceeds minimum output");
-
-        // Execute swap - recipient is this contract
-        amounts = IUniswapV2Router(router).swapExactETHForTokens{value: msg.value}(
-            params.amountOutMin,
-            params.path,
-            address(this),
-            params.deadline
+        require(
+            params.paymentAmount <= params.amountOutMin,
+            "Payment amount exceeds minimum output"
         );
 
+        // Execute swap - recipient is this contract
+        amounts = IUniswapV2Router(router).swapExactETHForTokens{
+            value: msg.value
+        }(params.amountOutMin, params.path, address(this), params.deadline);
+
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOutMin, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOutMin,
+            params.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.path[params.path.length - 1], params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.path[params.path.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -272,7 +325,16 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             feeAmount
         );
 
-        emit SwapExecuted(msg.sender, params.to, params.path[0], params.path[params.path.length - 1], msg.value, amounts[amounts.length - 1], params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.path[0],
+            params.path[params.path.length - 1],
+            msg.value,
+            amounts[amounts.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -280,12 +342,19 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
      * @param params SwapV2Params struct containing all swap parameters
      */
     function swapTokensForExactTokens(
-        SwapV2Params calldata params
-    ) external nonReentrant returns (uint256[] memory amounts) {
-        require(params.paymentAmount <= params.amountOutMin, "Payment amount exceeds minimum output");
+        SwapV2Params memory params
+    ) public nonReentrant returns (uint256[] memory amounts) {
+        require(
+            params.paymentAmount <= params.amountOutMin,
+            "Payment amount exceeds minimum output"
+        );
 
         // Transfer max tokens from sender to this contract
-        IERC20(params.path[0]).safeTransferFrom(msg.sender, address(this), params.amountIn);
+        IERC20(params.path[0]).safeTransferFrom(
+            msg.sender,
+            address(this),
+            params.amountIn
+        );
 
         // Approve router to spend tokens
         IERC20(params.path[0]).safeIncreaseAllowance(router, params.amountIn);
@@ -301,10 +370,18 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         );
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOutMin, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOutMin,
+            params.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.path[params.path.length - 1], params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.path[params.path.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute output tokens (interactions)
@@ -318,10 +395,163 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
 
         // Refund any unused input tokens back to sender
         if (params.amountIn > amounts[0]) {
-            IERC20(params.path[0]).safeTransfer(msg.sender, params.amountIn - amounts[0]);
+            IERC20(params.path[0]).safeTransfer(
+                msg.sender,
+                params.amountIn - amounts[0]
+            );
         }
 
-        emit SwapExecuted(msg.sender, params.to, params.path[0], params.path[params.path.length - 1], amounts[0], amounts[amounts.length - 1], params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.path[0],
+            params.path[params.path.length - 1],
+            amounts[0],
+            amounts[amounts.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
+    }
+
+    function existsInPath(address token, address[] memory path) internal pure returns (bool) {
+        for (uint i = 0; i < path.length; i++) {
+            if (path[i] == token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /*
+     * @dev batchPayout pays multple receivers and swaps tokens on Uniswap V2 / PancakeSwap
+     * @param params batchPayout struct containing payment parameters
+     */
+    function batchPayout(
+        PayoutIntent[] calldata payouts,
+        BatchPayoutSummary[] calldata payoutSummary,
+        address tokenIn,
+        uint256 deadline,
+        uint256 feeBps
+    ) external payable nonReentrant {
+        // Pull total input from caller
+        uint[] memory swapAmounts = new uint[](payoutSummary.length);
+        address[] memory swapTokens = new address[](payoutSummary.length);
+        address[] memory swapOutputs = new address[](payoutSummary.length);
+        require(feeBps <= maxFeeBps, "Fee exceeds maximum");
+        uint totalAmountIn = 0;
+        for (uint i = 0; i < payoutSummary.length; i++) {
+            totalAmountIn += payoutSummary[i].amountIn;
+        }
+        if(tokenIn == address(0x0)) {
+            require(msg.value >= totalAmountIn, "Insufficient ETH sent for swaps");
+        } else {
+            require(IERC20(tokenIn).balanceOf(msg.sender) >= totalAmountIn, "Insufficient token balance for swaps");
+            require(IERC20(tokenIn).allowance(msg.sender, address(this)) >= totalAmountIn, "Insufficient token allowance for swaps");
+            IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), totalAmountIn);
+            IERC20(tokenIn).safeIncreaseAllowance(router, totalAmountIn);
+        }
+        uint totalInputAmount = 0;
+        for (uint i = 0; i < payoutSummary.length; i++) {
+            require(payoutSummary[i].path.length > 1, "Swap intent must have more than 1 token in path");
+            require(!existsInPath(payoutSummary[i].path[payoutSummary[i].path.length - 1], swapOutputs), "Duplicate output token in swap intents");
+            swapOutputs[i] = payoutSummary[i].path[payoutSummary[i].path.length - 1];
+            // Execute swap - recipient is this contract
+            require((payoutSummary[i].path[0] ==  IUniswapV2Router(router).WETH() && tokenIn == address(0x0)) || (tokenIn ==  payoutSummary[i].path[0]), "Invalid swap path");
+            // if (tokenIn == payoutSummary[i].path[0] &&  tokenIn != address(0x0)) {
+            //     IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), payoutSummary[i].amountIn);
+            //     continue;
+            // }
+            if (
+                tokenIn == address(0x0)
+            ) {
+              
+                uint[] memory amounts = IUniswapV2Router(router)
+                    .swapETHForExactTokens{value: payoutSummary[i].amountIn}(
+                    payoutSummary[i].amountOut,
+                    payoutSummary[i].path,
+                    address(this),
+                    deadline
+                );
+                if(amounts[0] < payoutSummary[i].amountIn) {
+                    // Refund unused ETH
+                    (bool success, ) = payable(msg.sender).call{
+                        value: payoutSummary[i].amountIn - amounts[0]
+                    }("");
+                    require(success, "ETH refund failed");
+                }
+                totalInputAmount+=amounts[0];
+            } else {
+               
+                uint[] memory amounts = IUniswapV2Router(router)
+                    .swapTokensForExactTokens(
+                    payoutSummary[i].amountOut,
+                    payoutSummary[i].amountIn,
+                    payoutSummary[i].path,
+                    address(this),
+                    deadline
+                );
+                if(amounts[0] > 0 && amounts[0] < payoutSummary[i].amountIn) {
+                    // Refund unused tokens
+                    IERC20(tokenIn).safeTransfer(
+                        msg.sender,
+                        payoutSummary[i].amountIn - amounts[0]
+                    );
+                }
+                 totalInputAmount+=amounts[0];
+                 
+            }
+        }
+        require(totalInputAmount <= totalAmountIn, "Total input amount exceeds expected");
+        if(tokenIn != address(0x0)) {
+            // Revoke approval after swaps
+            IERC20(tokenIn).approve(router, 0);
+        }
+        for (uint i = 0; i < payouts.length; i++) {
+            require(payouts[i].token != address(0x0), "Invalid token address");
+            uint foundIndex = type(uint256).max;
+            for(uint j = 0; j < swapTokens.length; j++) {
+                if(swapTokens[j] == payouts[i].token || swapTokens[j] == address(0x0)) {
+                   foundIndex= j;
+                    break;
+                }
+            }
+            if(foundIndex == type(uint256).max)   {
+                revert("No swap intent for payout token");
+            }
+            swapTokens[foundIndex] = payouts[i].token;
+            swapAmounts[foundIndex] += payouts[i].amount;
+            IERC20(payouts[i].token).safeTransfer(payouts[i].recipient, payouts[i].amount);
+            emit PaymentExecuted(
+                msg.sender,
+                payouts[i].recipient,
+                payouts[i].token,
+                payouts[i].amount,
+                payouts[i].memo
+            );
+        }
+
+        // ensure that we received enough tokens to cover the payouts and fees
+        for (uint i = 0; i < swapTokens.length; i++) {
+            bool found = false;
+            for(uint j = 0; j < payoutSummary.length; j++) {
+                if(swapTokens[i] == payoutSummary[j].path[payoutSummary[j].path.length - 1]) { 
+                    found=true;
+                    if(swapAmounts[i] <= payoutSummary[j].amountOut) {
+                        require((payoutSummary[j].amountOut -  swapAmounts[i]) * 10000 / payoutSummary[j].amountOut <= feeBps, "Fee exceeds maximum");
+                       IERC20(swapTokens[i]).safeTransfer(feeReceiver, (payoutSummary[j].amountOut - swapAmounts[i]));
+                    } else {
+                        revert("Insufficient amount received from swap for payout");
+                    }
+                    
+                    break;
+                }
+                // if(payoutSummary[j].path.length == 0 && payoutSummary[j].amountOut == 0) {
+                //     found = true;
+                // }
+            }
+            require(found, "No swap intent for payout token");
+        }
+
     }
 
     /**
@@ -329,28 +559,35 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
      * @param params SwapETHParams struct containing swap parameters
      */
     function swapETHForExactTokens(
-        SwapETHParams calldata params
-    ) external payable nonReentrant returns (uint256[] memory amounts) {
+        SwapETHParams memory params
+    ) public payable nonReentrant returns (uint256[] memory amounts) {
         require(params.path[0] == WETH, "Path must start with WETH");
-        require(params.paymentAmount <= params.amountOutMin, "Payment amount exceeds minimum output");
+        require(
+            params.paymentAmount <= params.amountOutMin,
+            "Payment amount exceeds minimum output"
+        );
 
         uint256 ethBalanceBefore = address(this).balance - msg.value;
 
         // Execute swap - recipient is this contract
         // amountOut is the exact amount of tokens we want
-        amounts = IUniswapV2Router(router).swapETHForExactTokens{value: msg.value}(
-            params.amountOutMin,
-            params.path,
-            address(this),
-            params.deadline
-        );
+        amounts = IUniswapV2Router(router).swapETHForExactTokens{
+            value: msg.value
+        }(params.amountOutMin, params.path, address(this), params.deadline);
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOutMin, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOutMin,
+            params.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.path[params.path.length - 1], params.paymentAmount, params.memo);
-        
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.path[params.path.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
 
         // Distribute tokens (interactions)
         _distributeTokens(
@@ -364,11 +601,22 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         // Refund any unused ETH back to sender
         uint256 ethBalanceAfter = address(this).balance;
         if (ethBalanceAfter > ethBalanceBefore) {
-            (bool success, ) = payable(msg.sender).call{value: ethBalanceAfter - ethBalanceBefore}("");
+            (bool success, ) = payable(msg.sender).call{
+                value: ethBalanceAfter - ethBalanceBefore
+            }("");
             require(success, "ETH refund failed");
         }
         emit SwapFee(msg.sender, swapId, feeAmount);
-        emit SwapExecuted(msg.sender, params.to, params.path[0], params.path[params.path.length - 1], amounts[0], amounts[amounts.length - 1], params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.path[0],
+            params.path[params.path.length - 1],
+            amounts[0],
+            amounts[amounts.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -378,11 +626,21 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapExactTokensForETH(
         SwapV2Params calldata params
     ) external nonReentrant returns (uint256[] memory amounts) {
-        require(params.path[params.path.length - 1] == WETH, "Path must end with WETH");
-        require(params.paymentAmount <= params.amountOutMin, "Payment amount exceeds minimum output");
+        require(
+            params.path[params.path.length - 1] == WETH,
+            "Path must end with WETH"
+        );
+        require(
+            params.paymentAmount <= params.amountOutMin,
+            "Payment amount exceeds minimum output"
+        );
 
         // Transfer tokens from sender to this contract
-        IERC20(params.path[0]).safeTransferFrom(msg.sender, address(this), params.amountIn);
+        IERC20(params.path[0]).safeTransferFrom(
+            msg.sender,
+            address(this),
+            params.amountIn
+        );
 
         // Approve router to spend tokens
         IERC20(params.path[0]).safeIncreaseAllowance(router, params.amountIn);
@@ -397,10 +655,18 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         );
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOutMin, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOutMin,
+            params.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, WETH, params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            WETH,
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute ETH (interactions)
@@ -411,7 +677,16 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             feeAmount
         );
 
-        emit SwapExecuted(msg.sender, params.to, params.path[0], WETH, params.amountIn, amounts[amounts.length - 1],params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.path[0],
+            WETH,
+            params.amountIn,
+            amounts[amounts.length - 1],
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -421,34 +696,53 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapExactTokenForTokenSingleV3(
         SwapV3SingleParams calldata swapParams
     ) external nonReentrant returns (uint256 amountOut) {
-        require(swapParams.paymentAmount <= swapParams.amountOutMinimum, "Payment amount exceeds minimum output");
+        require(
+            swapParams.paymentAmount <= swapParams.amountOutMinimum,
+            "Payment amount exceeds minimum output"
+        );
 
         // Transfer tokens from sender to this contract
-        IERC20(swapParams.tokenIn).safeTransferFrom(msg.sender, address(this), swapParams.amountIn);
+        IERC20(swapParams.tokenIn).safeTransferFrom(
+            msg.sender,
+            address(this),
+            swapParams.amountIn
+        );
 
         // Approve router to spend tokens
-        IERC20(swapParams.tokenIn).safeIncreaseAllowance(router, swapParams.amountIn);
+        IERC20(swapParams.tokenIn).safeIncreaseAllowance(
+            router,
+            swapParams.amountIn
+        );
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactInputSingleParams memory v3Params = IUniswapV3Router.ExactInputSingleParams({
-            tokenIn: swapParams.tokenIn,
-            tokenOut: swapParams.tokenOut,
-            fee: swapParams.fee,
-            recipient: address(this),
-            deadline: swapParams.deadline,
-            amountIn: swapParams.amountIn,
-            amountOutMinimum: swapParams.amountOutMinimum,
-            sqrtPriceLimitX96: 0
-        });
+        IUniswapV3Router.ExactInputSingleParams
+            memory v3Params = IUniswapV3Router.ExactInputSingleParams({
+                tokenIn: swapParams.tokenIn,
+                tokenOut: swapParams.tokenOut,
+                fee: swapParams.fee,
+                recipient: address(this),
+                deadline: swapParams.deadline,
+                amountIn: swapParams.amountIn,
+                amountOutMinimum: swapParams.amountOutMinimum,
+                sqrtPriceLimitX96: 0
+            });
 
         // Execute swap
         amountOut = IUniswapV3Router(router).exactInputSingle(v3Params);
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(swapParams.amountOutMinimum, swapParams.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            swapParams.amountOutMinimum,
+            swapParams.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(swapParams.to, swapParams.tokenOut, swapParams.paymentAmount, swapParams.memo);
+        uint256 swapId = _storeSwap(
+            swapParams.to,
+            swapParams.tokenOut,
+            swapParams.paymentAmount,
+            swapParams.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -460,7 +754,16 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             feeAmount
         );
 
-        emit SwapExecuted( msg.sender, swapParams.to, swapParams.tokenIn, swapParams.tokenOut, swapParams.amountIn, amountOut, swapParams.paymentAmount, swapParams.memo);
+        emit SwapExecuted(
+            msg.sender,
+            swapParams.to,
+            swapParams.tokenIn,
+            swapParams.tokenOut,
+            swapParams.amountIn,
+            amountOut,
+            swapParams.paymentAmount,
+            swapParams.memo
+        );
     }
 
     /**
@@ -470,7 +773,10 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapExactTokenForTokenV3Multi(
         SwapV3MultiParams calldata swapParams
     ) external nonReentrant returns (uint256 amountOut) {
-        require(swapParams.paymentAmount <= swapParams.amountOutMinimum, "Payment amount exceeds minimum output");
+        require(
+            swapParams.paymentAmount <= swapParams.amountOutMinimum,
+            "Payment amount exceeds minimum output"
+        );
 
         // Extract first and last tokens from path
         address tokenIn;
@@ -482,33 +788,49 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
                 tokenIn := shr(96, calldataload(path.offset))
 
                 // Last token is 20 bytes before end
-                tokenOut := shr(96, calldataload(add(path.offset, sub(path.length, 20))))
+                tokenOut := shr(
+                    96,
+                    calldataload(add(path.offset, sub(path.length, 20)))
+                )
             }
         }
 
         // Transfer tokens from sender to this contract
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), swapParams.amountIn);
+        IERC20(tokenIn).safeTransferFrom(
+            msg.sender,
+            address(this),
+            swapParams.amountIn
+        );
 
         // Approve router to spend tokens
         IERC20(tokenIn).safeIncreaseAllowance(router, swapParams.amountIn);
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactInputParams memory v3Params = IUniswapV3Router.ExactInputParams({
-            path: swapParams.path,
-            recipient: address(this),
-            deadline: swapParams.deadline,
-            amountIn: swapParams.amountIn,
-            amountOutMinimum: swapParams.amountOutMinimum
-        });
+        IUniswapV3Router.ExactInputParams memory v3Params = IUniswapV3Router
+            .ExactInputParams({
+                path: swapParams.path,
+                recipient: address(this),
+                deadline: swapParams.deadline,
+                amountIn: swapParams.amountIn,
+                amountOutMinimum: swapParams.amountOutMinimum
+            });
 
         // Execute swap
         amountOut = IUniswapV3Router(router).exactInput(v3Params);
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(swapParams.amountOutMinimum, swapParams.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            swapParams.amountOutMinimum,
+            swapParams.paymentAmount
+        );
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(swapParams.to, tokenOut, swapParams.paymentAmount, swapParams.memo);
+        uint256 swapId = _storeSwap(
+            swapParams.to,
+            tokenOut,
+            swapParams.paymentAmount,
+            swapParams.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -520,7 +842,16 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             feeAmount
         );
 
-        emit SwapExecuted(msg.sender, swapParams.to, tokenIn, tokenOut, swapParams.amountIn, amountOut,  swapParams.paymentAmount, swapParams.memo);
+        emit SwapExecuted(
+            msg.sender,
+            swapParams.to,
+            tokenIn,
+            tokenOut,
+            swapParams.amountIn,
+            amountOut,
+            swapParams.paymentAmount,
+            swapParams.memo
+        );
     }
 
     /**
@@ -530,31 +861,45 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapETHForExactTokensSingleV3(
         SwapETHForExactTokensV3SingleParams calldata params
     ) external payable nonReentrant returns (uint256 amountIn) {
-        require(params.paymentAmount <= params.amountOut, "Payment amount exceeds output");
+        require(
+            params.paymentAmount <= params.amountOut,
+            "Payment amount exceeds output"
+        );
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOut, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOut,
+            params.paymentAmount
+        );
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactOutputSingleParams memory v3Params = IUniswapV3Router.ExactOutputSingleParams({
-            tokenIn: WETH,
-            tokenOut: params.tokenOut,
-            fee: params.fee,
-            recipient: address(this),
-            deadline: params.deadline,
-            amountOut: params.amountOut,
-            amountInMaximum: msg.value,
-            sqrtPriceLimitX96: 0
-        });
+        IUniswapV3Router.ExactOutputSingleParams
+            memory v3Params = IUniswapV3Router.ExactOutputSingleParams({
+                tokenIn: WETH,
+                tokenOut: params.tokenOut,
+                fee: params.fee,
+                recipient: address(this),
+                deadline: params.deadline,
+                amountOut: params.amountOut,
+                amountInMaximum: msg.value,
+                sqrtPriceLimitX96: 0
+            });
 
         // Execute swap (router will pull ETH)
-        amountIn = IUniswapV3Router(router).exactOutputSingle{value: msg.value}(v3Params);
+        amountIn = IUniswapV3Router(router).exactOutputSingle{value: msg.value}(
+            v3Params
+        );
 
         // Refund unused ETH
         IUniswapV3Router(router).refundETH();
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.tokenOut, params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.tokenOut,
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -569,11 +914,22 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         // Refund any remaining ETH to sender
         uint256 refundAmount = address(this).balance;
         if (refundAmount > 0) {
-            (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
+            (bool success, ) = payable(msg.sender).call{value: refundAmount}(
+                ""
+            );
             require(success, "ETH refund failed");
         }
 
-        emit SwapExecuted(msg.sender, params.to, WETH, params.tokenOut, amountIn, params.amountOut, params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            WETH,
+            params.tokenOut,
+            amountIn,
+            params.amountOut,
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -583,7 +939,10 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapETHForExactTokensV3Multi(
         SwapETHForExactTokensV3MultiParams calldata params
     ) external payable nonReentrant returns (uint256 amountIn) {
-        require(params.paymentAmount <= params.amountOut, "Payment amount exceeds output");
+        require(
+            params.paymentAmount <= params.amountOut,
+            "Payment amount exceeds output"
+        );
 
         // Extract tokenOut from path (first 20 bytes for exact output - path is reversed)
         address tokenOut;
@@ -595,25 +954,36 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         }
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOut, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOut,
+            params.paymentAmount
+        );
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactOutputParams memory v3Params = IUniswapV3Router.ExactOutputParams({
-            path: params.path,
-            recipient: address(this),
-            deadline: params.deadline,
-            amountOut: params.amountOut,
-            amountInMaximum: msg.value
-        });
+        IUniswapV3Router.ExactOutputParams memory v3Params = IUniswapV3Router
+            .ExactOutputParams({
+                path: params.path,
+                recipient: address(this),
+                deadline: params.deadline,
+                amountOut: params.amountOut,
+                amountInMaximum: msg.value
+            });
 
         // Execute swap
-        amountIn = IUniswapV3Router(router).exactOutput{value: msg.value}(v3Params);
+        amountIn = IUniswapV3Router(router).exactOutput{value: msg.value}(
+            v3Params
+        );
 
         // Refund unused ETH
         IUniswapV3Router(router).refundETH();
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, tokenOut, params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            tokenOut,
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute tokens (interactions)
@@ -628,11 +998,22 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         // Refund any remaining ETH to sender
         uint256 refundAmount = address(this).balance;
         if (refundAmount > 0) {
-            (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
+            (bool success, ) = payable(msg.sender).call{value: refundAmount}(
+                ""
+            );
             require(success, "ETH refund failed");
         }
 
-        emit SwapExecuted(msg.sender, params.to, WETH, tokenOut, amountIn, params.amountOut, params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            WETH,
+            tokenOut,
+            amountIn,
+            params.amountOut,
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -640,36 +1021,55 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
      * @param params SwapV3ExactOutputSingleParams struct containing all swap parameters
      */
     function swapTokensForExactTokensSingleV3(
-        SwapV3ExactOutputSingleParams calldata params
-    ) external nonReentrant returns (uint256 amountIn) {
-        require(params.paymentAmount <= params.amountOut, "Payment amount exceeds output");
+        SwapV3ExactOutputSingleParams memory params
+    ) public nonReentrant returns (uint256 amountIn) {
+        require(
+            params.paymentAmount <= params.amountOut,
+            "Payment amount exceeds output"
+        );
 
         // Transfer max tokens from sender to this contract
-        IERC20(params.tokenIn).safeTransferFrom(msg.sender, address(this), params.amountInMaximum);
+        IERC20(params.tokenIn).safeTransferFrom(
+            msg.sender,
+            address(this),
+            params.amountInMaximum
+        );
 
         // Approve router to spend tokens
-        IERC20(params.tokenIn).safeIncreaseAllowance(router, params.amountInMaximum);
+        IERC20(params.tokenIn).safeIncreaseAllowance(
+            router,
+            params.amountInMaximum
+        );
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOut, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOut,
+            params.paymentAmount
+        );
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactOutputSingleParams memory v3Params = IUniswapV3Router.ExactOutputSingleParams({
-            tokenIn: params.tokenIn,
-            tokenOut: params.tokenOut,
-            fee: params.fee,
-            recipient: address(this),
-            deadline: params.deadline,
-            amountOut: params.amountOut,
-            amountInMaximum: params.amountInMaximum,
-            sqrtPriceLimitX96: 0
-        });
+        IUniswapV3Router.ExactOutputSingleParams
+            memory v3Params = IUniswapV3Router.ExactOutputSingleParams({
+                tokenIn: params.tokenIn,
+                tokenOut: params.tokenOut,
+                fee: params.fee,
+                recipient: address(this),
+                deadline: params.deadline,
+                amountOut: params.amountOut,
+                amountInMaximum: params.amountInMaximum,
+                sqrtPriceLimitX96: 0
+            });
 
         // Execute swap
         amountIn = IUniswapV3Router(router).exactOutputSingle(v3Params);
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, params.tokenOut, params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            params.tokenOut,
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute output tokens (interactions)
@@ -683,10 +1083,22 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
 
         // Refund any unused input tokens back to sender
         if (params.amountInMaximum > amountIn) {
-            IERC20(params.tokenIn).safeTransfer(msg.sender, params.amountInMaximum - amountIn);
+            IERC20(params.tokenIn).safeTransfer(
+                msg.sender,
+                params.amountInMaximum - amountIn
+            );
         }
 
-        emit SwapExecuted(msg.sender, params.to, params.tokenIn, params.tokenOut, amountIn, params.amountOut, params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            params.tokenIn,
+            params.tokenOut,
+            amountIn,
+            params.amountOut,
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -696,7 +1108,10 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     function swapTokensForExactTokensV3Multi(
         SwapV3ExactOutputMultiParams calldata params
     ) external nonReentrant returns (uint256 amountIn) {
-        require(params.paymentAmount <= params.amountOut, "Payment amount exceeds output");
+        require(
+            params.paymentAmount <= params.amountOut,
+            "Payment amount exceeds output"
+        );
 
         // Extract tokenIn and tokenOut from path (path is reversed for exact output)
         address tokenIn;
@@ -706,33 +1121,49 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             assembly {
                 // For exact output, path is reversed: tokenOut is first, tokenIn is last
                 tokenOut := shr(96, calldataload(path.offset))
-                tokenIn := shr(96, calldataload(add(path.offset, sub(path.length, 20))))
+                tokenIn := shr(
+                    96,
+                    calldataload(add(path.offset, sub(path.length, 20)))
+                )
             }
         }
 
         // Transfer max tokens from sender to this contract
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), params.amountInMaximum);
+        IERC20(tokenIn).safeTransferFrom(
+            msg.sender,
+            address(this),
+            params.amountInMaximum
+        );
 
         // Approve router to spend tokens
         IERC20(tokenIn).safeIncreaseAllowance(router, params.amountInMaximum);
 
         // Calculate fee
-        uint256 feeAmount = _calculateFee(params.amountOut, params.paymentAmount);
+        uint256 feeAmount = _calculateFee(
+            params.amountOut,
+            params.paymentAmount
+        );
 
         // Prepare swap parameters - recipient is this contract
-        IUniswapV3Router.ExactOutputParams memory v3Params = IUniswapV3Router.ExactOutputParams({
-            path: params.path,
-            recipient: address(this),
-            deadline: params.deadline,
-            amountOut: params.amountOut,
-            amountInMaximum: params.amountInMaximum
-        });
+        IUniswapV3Router.ExactOutputParams memory v3Params = IUniswapV3Router
+            .ExactOutputParams({
+                path: params.path,
+                recipient: address(this),
+                deadline: params.deadline,
+                amountOut: params.amountOut,
+                amountInMaximum: params.amountInMaximum
+            });
 
         // Execute swap
         amountIn = IUniswapV3Router(router).exactOutput(v3Params);
 
         // Store swap data (effects before interactions)
-        uint256 swapId = _storeSwap(params.to, tokenOut, params.paymentAmount, params.memo);
+        uint256 swapId = _storeSwap(
+            params.to,
+            tokenOut,
+            params.paymentAmount,
+            params.memo
+        );
         emit SwapFee(msg.sender, swapId, feeAmount);
 
         // Distribute output tokens (interactions)
@@ -746,10 +1177,22 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
 
         // Refund any unused input tokens back to sender
         if (params.amountInMaximum > amountIn) {
-            IERC20(tokenIn).safeTransfer(msg.sender, params.amountInMaximum - amountIn);
+            IERC20(tokenIn).safeTransfer(
+                msg.sender,
+                params.amountInMaximum - amountIn
+            );
         }
 
-        emit SwapExecuted(msg.sender, params.to, tokenIn, tokenOut, amountIn, params.amountOut, params.paymentAmount, params.memo);
+        emit SwapExecuted(
+            msg.sender,
+            params.to,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            params.amountOut,
+            params.paymentAmount,
+            params.memo
+        );
     }
 
     /**
@@ -758,7 +1201,10 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
      * @param toId Ending swap ID (inclusive)
      * @return Array of SwapData structs
      */
-    function getSwapsByRange(uint256 fromId, uint256 toId) external view returns (SwapData[] memory) {
+    function getSwapsByRange(
+        uint256 fromId,
+        uint256 toId
+    ) external view returns (SwapData[] memory) {
         require(fromId <= toId, "Invalid range");
         require(toId <= lastSwapId, "Range exceeds last swap ID");
 
@@ -810,7 +1256,7 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     ) internal pure returns (uint256 feeAmount) {
         if (amountOutMin > paymentAmount) {
             feeAmount = amountOutMin - paymentAmount;
-            if (feeAmount > (maxFeeBps * amountOutMin / 10000)) {
+            if (feeAmount > ((maxFeeBps * amountOutMin) / 10000)) {
                 revert("Fee exceed max allowed");
             }
         }
@@ -891,8 +1337,8 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         address recipient,
         address token,
         uint256 paymentAmount,
-        string calldata memo
-    ) private returns(uint256)  {
+        string memory memo
+    ) private returns (uint256) {
         lastSwapId++;
         swaps[lastSwapId] = SwapData({
             recipient: recipient,
@@ -901,8 +1347,8 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             memo: memo
         });
         swapCounts[recipient]++;
-        swapTotalsReceipient[recipient]+=paymentAmount;
-        swapTotalsToken[token]+=paymentAmount;
+        swapTotalsReceipient[recipient] += paymentAmount;
+        swapTotalsToken[token] += paymentAmount;
         return lastSwapId;
     }
 

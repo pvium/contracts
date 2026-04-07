@@ -1,7 +1,7 @@
 import { ethers } from "hardhat";
 
 // Configuration - Update these values
-const TOKEN_ADDRESS = "0x9d0C28036AC12d2150a23DE40Bc4A92f7Aa1A79E"; // Replace with your token address
+const TOKEN_ADDRESS = "0x7dCEd3bFcC97948a665BB665a5D7eEfdfce39C3A"; // Replace with your token address
 const TOKEN_AMOUNT = "0"; // Amount of tokens to add (set to "0" to auto-calculate based on ETH_AMOUNT)
 const ETH_AMOUNT = "0.0321"; // Amount of ETH to add
 
