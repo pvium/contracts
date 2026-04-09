@@ -21,6 +21,9 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     // Roles
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
+    // Tokens accepted for direct invoice payments
+    mapping(address => bool) public acceptedTokens;
+
     // DEX Router address (Uniswap or PancakeSwap)
     address public immutable router;
 
@@ -153,6 +156,19 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         uint256 fee
     );
     event FeeReceiverUpdated(address indexed oldReceiver, address indexed newReceiver);
+    event InvoicePaid(
+        address indexed tokenAddress,
+        uint256 tokenAmount,
+        address indexed payerAddress,
+        address indexed payeeAddress,
+        string memo
+    );
+    event AcceptedTokenUpdated(address indexed tokenAddress, bool accepted);
+
+    error TokenNotAccepted(address tokenAddress);
+    error InvalidAddress();
+    error InvalidAmount();
+    error EmptyMemo();
 
     /**
      * @dev Constructor
@@ -193,6 +209,56 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         address oldReceiver = feeReceiver;
         feeReceiver = newFeeReceiver;
         emit FeeReceiverUpdated(oldReceiver, newFeeReceiver);
+    }
+
+    /**
+     * @dev Sets whether a token can be used for direct invoice payment.
+     * @param tokenAddress Token address to configure
+     * @param accepted Whether the token is accepted
+     */
+    function setAcceptedToken(address tokenAddress, bool accepted) external onlyRole(ADMIN_ROLE) {
+        if (tokenAddress == address(0)) {
+            revert InvalidAddress();
+        }
+
+        acceptedTokens[tokenAddress] = accepted;
+        emit AcceptedTokenUpdated(tokenAddress, accepted);
+    }
+
+    /**
+     * @notice Pays an invoice by transferring accepted ERC20 tokens from payer to payee.
+     * @dev memo may follow this convention: "<contract_code>:<installmentId>"
+     */
+    function payInvoice(
+        address tokenAddress,
+        uint256 tokenAmount,
+        address payeeAddress,
+        string calldata memo
+    ) external nonReentrant {
+        if (!acceptedTokens[tokenAddress]) {
+            revert TokenNotAccepted(tokenAddress);
+        }
+        
+        if (tokenAmount == 0) {
+            revert InvalidAmount();
+        }
+        if (bytes(memo).length == 0) {
+            revert EmptyMemo();
+        }
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), tokenAmount);
+
+        IERC20(tokenAddress).safeTransfer(payeeAddress, tokenAmount);
+
+        emit SwapExecuted(
+            msg.sender,
+            payeeAddress,
+            tokenAddress,
+            tokenAddress,
+            tokenAmount,
+            tokenAmount,
+            tokenAmount,
+            memo
+        );
     }
 
     /**
