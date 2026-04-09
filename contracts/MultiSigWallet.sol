@@ -38,6 +38,7 @@ contract MultiSigWallet is ReentrancyGuard {
     event OwnerAdded(address indexed owner);
     event OwnerRemoved(address indexed owner);
     event RequirementChanged(uint256 requiredConfirmations, uint256 requiredOwnerChange, uint256 requiredRequirementChange);
+    event ByteCodeDeployed(address indexed deployed, uint256 indexed batchId);
 
     // ─────────────────────────────── Storage ───────────────────────────────
 
@@ -250,6 +251,52 @@ contract MultiSigWallet is ReentrancyGuard {
         }
 
         emit TransactionExecuted(txId);
+    }
+
+    /**
+     * @notice Deploy a contract from raw bytecode after verifying owner signatures.
+     * @param bytecode  Deployment bytecode (constructor + runtime).
+     * @param value     ETH (in wei) to send to the constructor (0 for none).
+     * @param batchId   Unique batch identifier for replay protection.
+     * @param signatures Owner signatures over the action receipt.
+     */
+    function executeByteCode(
+        bytes calldata bytecode,
+        uint256 value,
+        uint256 batchId,
+        bytes[] calldata signatures
+    ) external onlyOwner nonReentrant returns (address deployed) {
+        require(bytecode.length > 0, "MultiSig: empty bytecode");
+        require(!isBatchIdUsed[batchId], "MultiSig: batchId already used");
+        if (value > 0) {
+            require(address(this).balance >= value, "MultiSig: insufficient ETH");
+        }
+
+        bytes32 receipt = keccak256(
+            abi.encode(
+                address(this),
+                block.chainid,
+                "executeByteCode",
+                keccak256(bytecode),
+                value,
+                batchId
+            )
+        );
+        require(!isReceiptUsed[receipt], "MultiSig: receipt already used");
+
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(receipt);
+        _verifyOwnerSignaturesThreshold(digest, signatures, requiredConfirmations);
+
+        isReceiptUsed[receipt] = true;
+        isBatchIdUsed[batchId] = true;
+
+        bytes memory _bytecode = bytecode;
+        assembly {
+            deployed := create(value, add(_bytecode, 0x20), mload(_bytecode))
+        }
+        require(deployed != address(0), "MultiSig: deployment failed");
+
+        emit ByteCodeDeployed(deployed, batchId);
     }
 
     /**
