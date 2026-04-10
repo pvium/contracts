@@ -1,6 +1,11 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
+import {
+    PaymentEntry,
+    generateBatchData,
+    getPaymentProof,
+} from "../scripts/merkleHelper";
 
 describe("UniversalDexRouter", function () {
     let universalDexRouter: any;
@@ -15,9 +20,13 @@ describe("UniversalDexRouter", function () {
     let recipient: any;
     let ADMIN_ROLE: any;
     let DEFAULT_ADMIN_ROLE: any;
+    let merkleBatchPayout: any;
+    let batchSigner: any;
+    let receiver1: any;
+    let receiver2: any;
 
     beforeEach(async function () {
-        [owner, admin, feeReceiver, user, recipient] = await ethers.getSigners();
+        [owner, admin, feeReceiver, user, recipient, batchSigner, receiver1, receiver2] = await ethers.getSigners();
 
         // Deploy mock tokens
         const MockToken = await ethers.getContractFactory("MockERC20");
@@ -60,6 +69,21 @@ describe("UniversalDexRouter", function () {
         await mockToken2.transfer(user.address, ethers.parseUnits("1000", 18));
         await mockToken1.connect(user).approve(await universalDexRouter.getAddress(), ethers.MaxUint256);
         await mockToken2.connect(user).approve(await universalDexRouter.getAddress(), ethers.MaxUint256);
+
+        // Deploy MerkleBatchPayout contract
+        const MerkleBatchPayout = await ethers.getContractFactory("MerkleBatchPayout");
+        merkleBatchPayout = await MerkleBatchPayout.deploy();
+        await merkleBatchPayout.waitForDeployment();
+
+        // Add MerkleBatchPayout contract to supported contracts
+        await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+            await merkleBatchPayout.getAddress(),
+            true
+        );
+
+        // Transfer tokens to batchSigner for batch funding
+        await mockToken2.transfer(batchSigner.address, ethers.parseUnits("1000", 18));
+        await mockToken2.connect(batchSigner).approve(await universalDexRouter.getAddress(), ethers.MaxUint256);
     });
 
     describe("Deployment", function () {
@@ -648,4 +672,742 @@ describe("UniversalDexRouter", function () {
             ).to.be.revertedWith("Fee exceed max allowed");
         });
     });
+
+    describe("Merkle Batch Payout - createMerkleBatch", function () {
+        let payments: PaymentEntry[];
+        let batchData: any;
+        let creatorWithdrawDate: number;
+        let signatureTimestamp: number;
+
+        beforeEach(async function () {
+            const now = Math.floor(Date.now() / 1000);
+            creatorWithdrawDate = now + 86400 * 30; // 30 days from now
+            signatureTimestamp = now;
+
+            payments = [
+                {
+                    receiverAddress: receiver1.address,
+                    amount: ethers.parseUnits("100", 18).toString(),
+                    claimableDate: now + 60,
+                    memo: "Payment to receiver 1"
+                },
+                {
+                    receiverAddress: receiver2.address,
+                    amount: ethers.parseUnits("50", 18).toString(),
+                    claimableDate: now + 120,
+                    memo: "Payment to receiver 2"
+                }
+            ];
+
+            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const totalAmount = ethers.parseUnits("150", 18);
+            batchData = await generateBatchData(
+                payments,
+                "test-batch-" + Date.now(),
+                batchSigner,
+                await mockToken2.getAddress(),
+                totalAmount,
+                signatureTimestamp,
+                Number(chainId)
+            );
+        });
+
+        it("Should successfully create a Merkle batch with swap funding", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const swapAmountIn = ethers.parseUnits("160", 18);
+
+            const batchPaySummary = {
+                amountIn: swapAmountIn,
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.emit(merkleBatchPayout, "BatchCreated");
+
+            const batch = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batch.exists).to.be.true;
+            expect(batch.signer).to.equal(batchData.signerAddress);
+            expect(batch.merkleRoot).to.equal(batchData.merkleRoot);
+            expect(batch.fundingToken).to.equal(await mockToken2.getAddress());
+            expect(batch.totalFunded).to.equal(totalAmount);
+            expect(batch.totalClaimed).to.equal(0);
+        });
+
+        it("Should revert with invalid Merkle batch payout contract address", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    ethers.ZeroAddress,
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.be.revertedWith("Invalid Merkle batch payout contract");
+        });
+
+        it("Should revert with unsupported Merkle batch payout contract", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            // Remove support for the contract
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                false
+            );
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.be.revertedWith("Unsupported Merkle batch payout contract");
+
+            // Re-enable for other tests
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                true
+            );
+        });
+
+        it("Should revert with invalid signer address", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    ethers.ZeroAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.be.revertedWith("Invalid signer");
+        });
+
+        it("Should revert with invalid merkle root", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    ethers.ZeroHash,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.be.revertedWith("Invalid merkle root");
+        });
+
+        it("Should revert with invalid funding token address", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), ethers.ZeroAddress] // Last element in path is funding token
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.be.revertedWith("Invalid funding token");
+        });
+
+        it("Should handle same input and output token without swap (direct transfer)", async function () {
+            const totalAmount = ethers.parseUnits("150", 18);
+
+            // Path with same token at start and end - should skip swap and do direct transfer
+            const batchPaySummary = {
+                amountIn: totalAmount,
+                amountOut: totalAmount,
+                path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await expect(
+                universalDexRouter.connect(user).createMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchPaySummary,
+                    batchData.batchHash,
+                    signatureTimestamp,
+                    batchData.signerAddress,
+                    batchData.merkleRoot,
+                    creatorWithdrawDate,
+                    batchData.signature,
+                    totalAmount,
+                    (await time.latest()) + 3600
+                )
+            ).to.emit(merkleBatchPayout, "BatchCreated");
+
+            const batch = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batch.exists).to.be.true;
+            expect(batch.signer).to.equal(batchData.signerAddress);
+            expect(batch.fundingToken).to.equal(await mockToken2.getAddress());
+            expect(batch.totalFunded).to.equal(totalAmount);
+            expect(batch.totalClaimed).to.equal(0);
+        });
+
+        // Note: This test is commented out because the function signature was changed
+        // to accept a single BatchPaySummary instead of an array
+        // it("Should handle multiple swaps to fund batch", async function () {
+        //     const totalAmount = ethers.parseUnits("150", 18);
+
+        //     const batchPaySummary = [
+        //         {
+        //             amountIn: ethers.parseUnits("100", 18),
+        //             amountOut: ethers.parseUnits("100", 18),
+        //             path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+        //         },
+        //         {
+        //             amountIn: ethers.parseUnits("50", 18),
+        //             amountOut: ethers.parseUnits("50", 18),
+        //             path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+        //         }
+        //     ];
+
+        //     await expect(
+        //         universalDexRouter.connect(user).createMerkleBatch(
+        //             await merkleBatchPayout.getAddress(),
+        //             batchPaySummary,
+        //             batchData.batchHash,
+        //             signatureTimestamp,
+        //             batchData.signerAddress,
+        //             batchData.merkleRoot,
+        //             creatorWithdrawDate,
+        //             await mockToken2.getAddress(),
+        //             batchData.signature,
+        //             totalAmount,
+        //             (await time.latest()) + 3600
+        //         )
+        //     ).to.emit(merkleBatchPayout, "BatchCreated");
+
+        //     const batch = await merkleBatchPayout.getBatch(batchData.batchId);
+        //     expect(batch.totalFunded).to.equal(totalAmount);
+        // });
+    });
+
+    describe("Merkle Batch Payout - claimMerkleBatchPayment", function () {
+        let payments: PaymentEntry[];
+        let batchData: any;
+        let creatorWithdrawDate: number;
+        let proof1: string[];
+        let proof2: string[];
+        let signatureTimestamp: number;
+
+        beforeEach(async function () {
+            const now = Math.floor(Date.now() / 1000);
+            creatorWithdrawDate = now + 86400 * 30;
+            signatureTimestamp = now;
+
+            payments = [
+                {
+                    receiverAddress: receiver1.address,
+                    amount: ethers.parseUnits("100", 18).toString(),
+                    claimableDate: now + 10, // Claimable soon
+                    memo: "Payment to receiver 1"
+                },
+                {
+                    receiverAddress: receiver2.address,
+                    amount: ethers.parseUnits("50", 18).toString(),
+                    claimableDate: now + 10,
+                    memo: "Payment to receiver 2"
+                }
+            ];
+
+            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const totalAmount = ethers.parseUnits("150", 18);
+            batchData = await generateBatchData(
+                payments,
+                "claim-test-" + Date.now(),
+                batchSigner,
+                await mockToken2.getAddress(),
+                totalAmount,
+                signatureTimestamp,
+                Number(chainId)
+            );
+
+            // Create the batch first
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("160", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await universalDexRouter.connect(user).createMerkleBatch(
+                await merkleBatchPayout.getAddress(),
+                batchPaySummary,
+                batchData.batchHash,
+                signatureTimestamp,
+                batchData.signerAddress,
+                batchData.merkleRoot,
+                creatorWithdrawDate,
+                batchData.signature,
+                totalAmount,
+                    (await time.latest()) + 3600
+            );
+
+            // Generate proofs
+            proof1 = getPaymentProof(batchData.tree, batchData.batchId, payments[0]);
+            proof2 = getPaymentProof(batchData.tree, batchData.batchId, payments[1]);
+
+            // Wait for claimable date
+            await time.increase(15);
+        });
+
+        it("Should successfully claim a payment from Merkle batch", async function () {
+            const receiver1BalanceBefore = await mockToken2.balanceOf(receiver1.address);
+
+            await expect(
+                universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    payments[0].receiverAddress,
+                    payments[0].amount,
+                    payments[0].claimableDate,
+                    payments[0].memo,
+                    proof1
+                )
+            ).to.emit(merkleBatchPayout, "PaymentClaimed")
+                .withArgs(
+                    batchData.batchId,
+                    receiver1.address,
+                    payments[0].amount,
+                    await mockToken2.getAddress(),
+                    payments[0].memo
+                );
+
+            const receiver1BalanceAfter = await mockToken2.balanceOf(receiver1.address);
+            expect(receiver1BalanceAfter - receiver1BalanceBefore).to.equal(payments[0].amount);
+
+            // Check batch state
+            const batch = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batch.totalClaimed).to.equal(payments[0].amount);
+        });
+
+        it("Should allow multiple different receivers to claim", async function () {
+            // Receiver 1 claims
+            await universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                await merkleBatchPayout.getAddress(),
+                batchData.batchId,
+                payments[0].receiverAddress,
+                payments[0].amount,
+                payments[0].claimableDate,
+                payments[0].memo,
+                proof1
+            );
+
+            // Receiver 2 claims
+            const receiver2BalanceBefore = await mockToken2.balanceOf(receiver2.address);
+
+            await expect(
+                universalDexRouter.connect(receiver2).claimMerkleBatchPayment(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    payments[1].receiverAddress,
+                    payments[1].amount,
+                    payments[1].claimableDate,
+                    payments[1].memo,
+                    proof2
+                )
+            ).to.emit(merkleBatchPayout, "PaymentClaimed");
+
+            const receiver2BalanceAfter = await mockToken2.balanceOf(receiver2.address);
+            expect(receiver2BalanceAfter - receiver2BalanceBefore).to.equal(payments[1].amount);
+
+            // Check total claimed
+            const batch = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batch.totalClaimed).to.equal(
+                BigInt(payments[0].amount) + BigInt(payments[1].amount)
+            );
+        });
+
+        it("Should revert when claiming twice", async function () {
+            // First claim succeeds
+            await universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                await merkleBatchPayout.getAddress(),
+                batchData.batchId,
+                payments[0].receiverAddress,
+                payments[0].amount,
+                payments[0].claimableDate,
+                payments[0].memo,
+                proof1
+            );
+
+            // Second claim fails
+            await expect(
+                universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    payments[0].receiverAddress,
+                    payments[0].amount,
+                    payments[0].claimableDate,
+                    payments[0].memo,
+                    proof1
+                )
+            ).to.be.revertedWith("Payment already claimed");
+        });
+
+        it("Should revert with invalid Merkle batch payout contract", async function () {
+            await expect(
+                universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                    ethers.ZeroAddress,
+                    batchData.batchId,
+                    payments[0].receiverAddress,
+                    payments[0].amount,
+                    payments[0].claimableDate,
+                    payments[0].memo,
+                    proof1
+                )
+            ).to.be.revertedWith("Invalid Merkle batch payout contract");
+        });
+
+        it("Should revert with unsupported Merkle batch payout contract", async function () {
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                false
+            );
+
+            await expect(
+                universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    payments[0].receiverAddress,
+                    payments[0].amount,
+                    payments[0].claimableDate,
+                    payments[0].memo,
+                    proof1
+                )
+            ).to.be.revertedWith("Unsupported Merkle batch payout contract");
+
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                true
+            );
+        });
+
+        it("Should revert with non-existent batch", async function () {
+            const fakeBatchId = ethers.keccak256(ethers.toUtf8Bytes("fake-batch"));
+
+            await expect(
+                universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                    await merkleBatchPayout.getAddress(),
+                    fakeBatchId,
+                    payments[0].receiverAddress,
+                    payments[0].amount,
+                    payments[0].claimableDate,
+                    payments[0].memo,
+                    proof1
+                )
+            ).to.be.revertedWith("Batch does not exist");
+        });
+    });
+
+    describe("Merkle Batch Payout - addFundsToMerkleBatch", function () {
+        let payments: PaymentEntry[];
+        let batchData: any;
+        let creatorWithdrawDate: number;
+        let signatureTimestamp: number;
+
+        beforeEach(async function () {
+            const now = Math.floor(Date.now() / 1000);
+            creatorWithdrawDate = now + 86400 * 30;
+            signatureTimestamp = now;
+
+            payments = [
+                {
+                    receiverAddress: receiver1.address,
+                    amount: ethers.parseUnits("100", 18).toString(),
+                    claimableDate: now + 10,
+                    memo: "Payment to receiver 1"
+                }
+            ];
+
+            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const totalAmount = ethers.parseUnits("100", 18);
+            batchData = await generateBatchData(
+                payments,
+                "add-funds-test-" + Date.now(),
+                batchSigner,
+                await mockToken2.getAddress(),
+                totalAmount,
+                signatureTimestamp,
+                Number(chainId)
+            );
+
+            // Create the batch
+            const batchPaySummary = {
+                amountIn: ethers.parseUnits("105", 18),
+                amountOut: totalAmount,
+                path: [await mockToken1.getAddress(), await mockToken2.getAddress()]
+            };
+
+            await universalDexRouter.connect(user).createMerkleBatch(
+                await merkleBatchPayout.getAddress(),
+                batchPaySummary,
+                batchData.batchHash,
+                signatureTimestamp,
+                batchData.signerAddress,
+                batchData.merkleRoot,
+                creatorWithdrawDate,
+                batchData.signature,
+                totalAmount,
+                    (await time.latest()) + 3600
+            );
+        });
+
+        it("Should successfully add funds to an existing Merkle batch", async function () {
+            const additionalAmount = ethers.parseUnits("50", 18);
+
+            const batchBefore = await merkleBatchPayout.getBatch(batchData.batchId);
+            const totalFundedBefore = batchBefore.totalFunded;
+
+            await expect(
+                universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    additionalAmount
+                )
+            ).to.emit(merkleBatchPayout, "BatchFunded")
+                .withArgs(
+                    batchData.batchId,
+                    await mockToken2.getAddress(),
+                    additionalAmount
+                );
+
+            const batchAfter = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batchAfter.totalFunded).to.equal(totalFundedBefore + additionalAmount);
+        });
+
+        it("Should allow anyone to add funds to a batch", async function () {
+            const additionalAmount = ethers.parseUnits("25", 18);
+
+            // Transfer tokens to user first
+            await mockToken2.transfer(user.address, additionalAmount);
+            await mockToken2.connect(user).approve(
+                await universalDexRouter.getAddress(),
+                additionalAmount
+            );
+
+            const batchBefore = await merkleBatchPayout.getBatch(batchData.batchId);
+            const totalFundedBefore = batchBefore.totalFunded;
+
+            await universalDexRouter.connect(user).addFundsToMerkleBatch(
+                await merkleBatchPayout.getAddress(),
+                batchData.batchId,
+                additionalAmount
+            );
+
+            const batchAfter = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batchAfter.totalFunded).to.equal(totalFundedBefore + additionalAmount);
+        });
+
+        it("Should revert with invalid Merkle batch payout contract", async function () {
+            await expect(
+                universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                    ethers.ZeroAddress,
+                    batchData.batchId,
+                    ethers.parseUnits("50", 18)
+                )
+            ).to.be.revertedWith("Invalid Merkle batch payout contract");
+        });
+
+        it("Should revert with unsupported Merkle batch payout contract", async function () {
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                false
+            );
+
+            await expect(
+                universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    ethers.parseUnits("50", 18)
+                )
+            ).to.be.revertedWith("Unsupported Merkle batch payout contract");
+
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                true
+            );
+        });
+
+        it("Should revert with zero amount", async function () {
+            await expect(
+                universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    batchData.batchId,
+                    0
+                )
+            ).to.be.revertedWith("Amount must be greater than 0");
+        });
+
+        it("Should revert with non-existent batch", async function () {
+            const fakeBatchId = ethers.keccak256(ethers.toUtf8Bytes("fake-batch"));
+
+            await expect(
+                universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                    await merkleBatchPayout.getAddress(),
+                    fakeBatchId,
+                    ethers.parseUnits("50", 18)
+                )
+            ).to.be.revertedWith("Batch does not exist");
+        });
+
+        it("Should correctly handle adding funds after partial claims", async function () {
+            // Wait for claimable date
+            await time.increase(15);
+
+            // Claim part of the batch
+            const proof = getPaymentProof(batchData.tree, batchData.batchId, payments[0]);
+            await universalDexRouter.connect(receiver1).claimMerkleBatchPayment(
+                await merkleBatchPayout.getAddress(),
+                batchData.batchId,
+                payments[0].receiverAddress,
+                payments[0].amount,
+                payments[0].claimableDate,
+                payments[0].memo,
+                proof
+            );
+
+            const batchBeforeFunding = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batchBeforeFunding.totalClaimed).to.equal(payments[0].amount);
+
+            // Add more funds
+            const additionalAmount = ethers.parseUnits("100", 18);
+            await universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
+                await merkleBatchPayout.getAddress(),
+                batchData.batchId,
+                additionalAmount
+            );
+
+            const batchAfterFunding = await merkleBatchPayout.getBatch(batchData.batchId);
+            expect(batchAfterFunding.totalFunded).to.equal(
+                batchBeforeFunding.totalFunded + additionalAmount
+            );
+            expect(batchAfterFunding.totalClaimed).to.equal(payments[0].amount);
+        });
+    });
+
+    describe("Merkle Batch Payout Support Management", function () {
+        it("Should allow admin to add Merkle batch payout support", async function () {
+            const newContract = user.address; // Using user address as dummy contract
+
+            await expect(
+                universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                    newContract,
+                    true
+                )
+            ).to.emit(universalDexRouter, "MerkleBatchPayoutContractUpdated")
+                .withArgs(newContract, true);
+
+            expect(
+                await universalDexRouter.supportMerkleBatchPayoutContracts(newContract)
+            ).to.be.true;
+        });
+
+        it("Should allow admin to remove Merkle batch payout support", async function () {
+            await expect(
+                universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                    await merkleBatchPayout.getAddress(),
+                    false
+                )
+            ).to.emit(universalDexRouter, "MerkleBatchPayoutContractUpdated")
+                .withArgs(await merkleBatchPayout.getAddress(), false);
+
+            expect(
+                await universalDexRouter.supportMerkleBatchPayoutContracts(
+                    await merkleBatchPayout.getAddress()
+                )
+            ).to.be.false;
+
+            // Re-enable for other tests
+            await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                await merkleBatchPayout.getAddress(),
+                true
+            );
+        });
+
+        it("Should revert if non-admin tries to add support", async function () {
+            await expect(
+                universalDexRouter.connect(user).setSupportedMerkleBatchPayoutContract(
+                    user.address,
+                    true
+                )
+            ).to.be.revertedWithCustomError(universalDexRouter, "AccessControlUnauthorizedAccount");
+        });
+
+        it("Should revert with invalid contract address", async function () {
+            await expect(
+                universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
+                    ethers.ZeroAddress,
+                    true
+                )
+            ).to.be.revertedWith("Invalid Merkle batch payout contract");
+        });
+    });
+
 });

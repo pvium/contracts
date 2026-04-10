@@ -1,23 +1,35 @@
 import { toUtf8Bytes } from "ethers";
 import { ethers } from "hardhat";
 
-const deployConfig: Record<number, { uniswapV2Router: string; wethAddress: string; feeReciever: string   }>= {
-  84532: { // Base Sepolia
-    uniswapV2Router: "0x1689E7B1F10000AE47eBfE339a4f69dECd19F602",
-    wethAddress: "0x4200000000000000000000000000000000000006",
-    feeReciever:  "0x3fd6ecdcd225c3de0e073b337c4cbac5342e2ac8"
+export const deployConfig: Record<
+  number,
+  {
+    uniswapV2Router: string;
+    wethAddress: string;
+    feeReciever: string;
+    merkleBatchContract: string;
+  }
+> = {
+  84532: {
+    // Base Sepolia
+    uniswapV2Router: '0x1689E7B1F10000AE47eBfE339a4f69dECd19F602',
+    wethAddress: '0x4200000000000000000000000000000000000006',
+    feeReciever: '0x3fd6ecdcd225c3de0e073b337c4cbac5342e2ac8',
+    merkleBatchContract: '0x6591B0E35091Af9F3096A4CeE91afE64718DdC77',
   },
   8453: {
-    uniswapV2Router: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24", // Uniswap V2 Router on Base Mainnet
-    wethAddress: "0x4200000000000000000000000000000000000006", // WETH on Base Mainnet
-    feeReciever:  "0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F"  
+    uniswapV2Router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24', // Uniswap V2 Router on Base Mainnet
+    wethAddress: '0x4200000000000000000000000000000000000006', // WETH on Base Mainnet
+    feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
+    merkleBatchContract: '0xc97cD7b61988C7830291a9E7496Cf203Ca8518c1',
   },
   56: {
-    uniswapV2Router: "0x10ED43C718714eb63d5aA57B78B54704E256024E", // PancakeSwap V2 Router on BSC Mainnet
-    wethAddress: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", // WBNB on BSC Mainnet
-    feeReciever: "0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F"
-  }
-}
+    uniswapV2Router: '0x10ED43C718714eb63d5aA57B78B54704E256024E', // PancakeSwap V2 Router on BSC Mainnet
+    wethAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB on BSC Mainnet
+    feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
+    merkleBatchContract: '0xc97cD7b61988C7830291a9E7496Cf203Ca8518c1',
+  },
+};
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -59,6 +71,7 @@ async function main() {
   console.log("├─ WETH:", WETH_ADDRESS);
   console.log("├─ Fee Receiver:", feeReceiver);
   console.log("├─ Default Admin:", deployer.address);
+  console.log('└─ MerkelTreeContract:', conf.merkleBatchContract);
   console.log("└─ Admin:", deployer.address);
   console.log();
 
@@ -71,7 +84,8 @@ async function main() {
     WETH_ADDRESS,
     feeReceiver,
     deployer.address, // defaultAdmin
-    deployer.address  // admin
+    deployer.address, // admin
+    conf.merkleBatchContract,
   );
 
   await router.waitForDeployment();
@@ -126,6 +140,14 @@ async function main() {
 
   console.log("Save this information:");
   console.log("UNIVERSAL_DEX_ROUTER_ADDRESS=" + routerAddress);
+  console.log();
+
+  console.log('Next steps:');
+  console.log('1. Deploy MerkleBatchPayout contract (if not already deployed)');
+  console.log('2. Register MerkleBatchPayout contract:');
+  console.log(
+    '   await universalDexRouter.setSupportedMerkleBatchPayoutContract(merkleBatchPayoutAddress, true)',
+  );
 }
 
 main()

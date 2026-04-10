@@ -5,8 +5,11 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IUniswapV2Router.sol";
 import "./interfaces/IUniswapV3Router.sol";
+import "./interfaces/IMerkleBatchPayout.sol";
 import "./interfaces/IWETH.sol";
 
 /**
@@ -17,6 +20,7 @@ import "./interfaces/IWETH.sol";
  */
 contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using MessageHashUtils for bytes32;
 
     // Roles
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -31,6 +35,9 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     address public feeReceiver;
 
     uint256 public immutable maxFeeBps = 30; // Max fee in basis points (0.3%)
+
+    mapping(bytes32 => uint) public paidBatchIds; // For future extensibility
+    mapping(address => bool) public supportMerkleBatchPayoutContracts; // For future extensibility
 
     // Swap tracking
     struct SwapData {
@@ -86,13 +93,13 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
     }
 
     struct PayoutIntent {
-        address recipient;
+        address receiver;
         uint256 amount;
         address token;
         string memo;
     }
 
-    struct BatchPayoutSummary {
+    struct BatchPaySummary {
         uint256 amountIn;
         uint256 amountOut;
         address[] path;
@@ -167,10 +174,20 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         uint256 paymentAmount,
         string memo
     );
+    event BatchPaid(
+        bytes32 indexed batch,
+        address indexed inputToken,
+        uint indexed inputAmount,
+        address payer
+    );
     event SwapFee(address indexed sender, uint256 indexed swapId, uint256 fee);
     event FeeReceiverUpdated(
         address indexed oldReceiver,
         address indexed newReceiver
+    );
+    event MerkleBatchPayoutContractUpdated(
+        address indexed merkleBatchPayoutContract,
+        bool supported
     );
 
     /**
@@ -186,13 +203,15 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         address _weth,
         address _feeReceiver,
         address _defaultAdmin,
-        address _admin
+        address _admin,
+        address _merkleTreeContract
     ) {
         require(_router != address(0), "Invalid router address");
         require(_weth != address(0), "Invalid WETH address");
         require(_feeReceiver != address(0), "Invalid fee receiver address");
         require(_defaultAdmin != address(0), "Invalid default admin address");
         require(_admin != address(0), "Invalid admin address");
+        supportMerkleBatchPayoutContracts[_merkleTreeContract] = true;
 
         router = _router;
         WETH = _weth;
@@ -214,6 +233,23 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         address oldReceiver = feeReceiver;
         feeReceiver = newFeeReceiver;
         emit FeeReceiverUpdated(oldReceiver, newFeeReceiver);
+    }
+
+    function setSupportedMerkleBatchPayoutContract(
+        address merkleBatchPayoutContract,
+        bool supported
+    ) external onlyRole(ADMIN_ROLE) {
+        require(
+            merkleBatchPayoutContract != address(0),
+            "Invalid Merkle batch payout contract"
+        );
+        supportMerkleBatchPayoutContracts[
+            merkleBatchPayoutContract
+        ] = supported;
+        emit MerkleBatchPayoutContractUpdated(
+            merkleBatchPayoutContract,
+            supported
+        );
     }
 
     /**
@@ -413,7 +449,10 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         );
     }
 
-    function existsInPath(address token, address[] memory path) internal pure returns (bool) {
+    function existsInPath(
+        address token,
+        address[] memory path
+    ) internal pure returns (bool) {
         for (uint i = 0; i < path.length; i++) {
             if (path[i] == token) {
                 return true;
@@ -422,18 +461,32 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         return false;
     }
 
-    /*
-     * @dev batchPayout pays multple receivers and swaps tokens on Uniswap V2 / PancakeSwap
-     * @param params batchPayout struct containing payment parameters
+    /**
+     * @dev Execute multiple token swaps and distribute payments to recipients in a single transaction
+     * @param payouts Array of payment instructions (recipient, amount, token, memo)
+     * @param payoutSummary Array of swap configurations (amountIn, amountOut, path). Each path must have unique output token
+     * @param tokenIn Input token for all swaps (address(0) for ETH, requires msg.value)
+     * @param deadline Unix timestamp deadline for swaps
+     * @param feeBps Maximum acceptable fee in basis points (max 30 bps). Fee = (swap output - payouts per token)
      */
-    function batchPayout(
+    function batchPay(
         PayoutIntent[] calldata payouts,
-        BatchPayoutSummary[] calldata payoutSummary,
+        BatchPaySummary[] calldata payoutSummary,
         address tokenIn,
         uint256 deadline,
-        uint256 feeBps
+        uint256 feeBps,
+        bytes32 batchHash,
+        bytes calldata salt
     ) external payable nonReentrant {
         // Pull total input from caller
+        if (batchHash != bytes32(0)) {
+            require(
+                batchHash == keccak256(abi.encode(salt, payouts)),
+                "Batch hash mismatch"
+            );
+            require(paidBatchIds[batchHash] == 0, "Batch already paid");
+            paidBatchIds[batchHash] = block.timestamp;
+        }
         uint[] memory swapAmounts = new uint[](payoutSummary.length);
         address[] memory swapTokens = new address[](payoutSummary.length);
         address[] memory swapOutputs = new address[](payoutSummary.length);
@@ -442,29 +495,56 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         for (uint i = 0; i < payoutSummary.length; i++) {
             totalAmountIn += payoutSummary[i].amountIn;
         }
-        if(tokenIn == address(0x0)) {
-            require(msg.value >= totalAmountIn, "Insufficient ETH sent for swaps");
+        if (tokenIn == address(0x0)) {
+            require(
+                msg.value >= totalAmountIn,
+                "Insufficient ETH sent for swaps"
+            );
         } else {
-            require(IERC20(tokenIn).balanceOf(msg.sender) >= totalAmountIn, "Insufficient token balance for swaps");
-            require(IERC20(tokenIn).allowance(msg.sender, address(this)) >= totalAmountIn, "Insufficient token allowance for swaps");
-            IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), totalAmountIn);
+            require(
+                IERC20(tokenIn).balanceOf(msg.sender) >= totalAmountIn,
+                "Insufficient token balance for swaps"
+            );
+            require(
+                IERC20(tokenIn).allowance(msg.sender, address(this)) >=
+                    totalAmountIn,
+                "Insufficient token allowance for swaps"
+            );
+            IERC20(tokenIn).safeTransferFrom(
+                msg.sender,
+                address(this),
+                totalAmountIn
+            );
             IERC20(tokenIn).safeIncreaseAllowance(router, totalAmountIn);
         }
         uint totalInputAmount = 0;
         for (uint i = 0; i < payoutSummary.length; i++) {
-            require(payoutSummary[i].path.length > 1, "Swap intent must have more than 1 token in path");
-            require(!existsInPath(payoutSummary[i].path[payoutSummary[i].path.length - 1], swapOutputs), "Duplicate output token in swap intents");
-            swapOutputs[i] = payoutSummary[i].path[payoutSummary[i].path.length - 1];
+            require(
+                payoutSummary[i].path.length > 1,
+                "Swap intent must have more than 1 token in path"
+            );
+            require(
+                !existsInPath(
+                    payoutSummary[i].path[payoutSummary[i].path.length - 1],
+                    swapOutputs
+                ),
+                "Duplicate output token in swap intents"
+            );
+            swapOutputs[i] = payoutSummary[i].path[
+                payoutSummary[i].path.length - 1
+            ];
             // Execute swap - recipient is this contract
-            require((payoutSummary[i].path[0] ==  IUniswapV2Router(router).WETH() && tokenIn == address(0x0)) || (tokenIn ==  payoutSummary[i].path[0]), "Invalid swap path");
+            require(
+                (payoutSummary[i].path[0] == IUniswapV2Router(router).WETH() &&
+                    tokenIn == address(0x0)) ||
+                    (tokenIn == payoutSummary[i].path[0]),
+                "Invalid swap path"
+            );
             // if (tokenIn == payoutSummary[i].path[0] &&  tokenIn != address(0x0)) {
             //     IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), payoutSummary[i].amountIn);
             //     continue;
             // }
-            if (
-                tokenIn == address(0x0)
-            ) {
-              
+            if (tokenIn == address(0x0)) {
                 uint[] memory amounts = IUniswapV2Router(router)
                     .swapETHForExactTokens{value: payoutSummary[i].amountIn}(
                     payoutSummary[i].amountOut,
@@ -472,58 +552,73 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
                     address(this),
                     deadline
                 );
-                if(amounts[0] < payoutSummary[i].amountIn) {
+                if (amounts[0] < payoutSummary[i].amountIn) {
                     // Refund unused ETH
                     (bool success, ) = payable(msg.sender).call{
                         value: payoutSummary[i].amountIn - amounts[0]
                     }("");
                     require(success, "ETH refund failed");
                 }
-                totalInputAmount+=amounts[0];
+                totalInputAmount += amounts[0];
             } else {
-               
-                uint[] memory amounts = IUniswapV2Router(router)
-                    .swapTokensForExactTokens(
-                    payoutSummary[i].amountOut,
-                    payoutSummary[i].amountIn,
-                    payoutSummary[i].path,
-                    address(this),
-                    deadline
-                );
-                if(amounts[0] > 0 && amounts[0] < payoutSummary[i].amountIn) {
-                    // Refund unused tokens
-                    IERC20(tokenIn).safeTransfer(
-                        msg.sender,
-                        payoutSummary[i].amountIn - amounts[0]
-                    );
+                // Check if swap is needed or if it's a direct transfer (same token)
+                if (tokenIn != payoutSummary[i].path[payoutSummary[i].path.length - 1]) {
+                    // Swap needed: different input and output tokens
+                    uint[] memory amounts = IUniswapV2Router(router)
+                        .swapTokensForExactTokens(
+                            payoutSummary[i].amountOut,
+                            payoutSummary[i].amountIn,
+                            payoutSummary[i].path,
+                            address(this),
+                            deadline
+                        );
+                    if (amounts[0] > 0 && amounts[0] < payoutSummary[i].amountIn) {
+                        // Refund unused tokens
+                        IERC20(tokenIn).safeTransfer(
+                            msg.sender,
+                            payoutSummary[i].amountIn - amounts[0]
+                        );
+                    }
+                    totalInputAmount += amounts[0];
+                } else {
+                    // No swap needed: same token (already pulled from user earlier)
+                    // Just track the amount - tokens already in this contract
+                    totalInputAmount += payoutSummary[i].amountOut;
                 }
-                 totalInputAmount+=amounts[0];
-                 
             }
         }
-        require(totalInputAmount <= totalAmountIn, "Total input amount exceeds expected");
-        if(tokenIn != address(0x0)) {
+        require(
+            totalInputAmount <= totalAmountIn,
+            "Total input amount exceeds expected"
+        );
+        if (tokenIn != address(0x0)) {
             // Revoke approval after swaps
             IERC20(tokenIn).approve(router, 0);
         }
         for (uint i = 0; i < payouts.length; i++) {
             require(payouts[i].token != address(0x0), "Invalid token address");
             uint foundIndex = type(uint256).max;
-            for(uint j = 0; j < swapTokens.length; j++) {
-                if(swapTokens[j] == payouts[i].token || swapTokens[j] == address(0x0)) {
-                   foundIndex= j;
+            for (uint j = 0; j < swapTokens.length; j++) {
+                if (
+                    swapTokens[j] == payouts[i].token ||
+                    swapTokens[j] == address(0x0)
+                ) {
+                    foundIndex = j;
                     break;
                 }
             }
-            if(foundIndex == type(uint256).max)   {
+            if (foundIndex == type(uint256).max) {
                 revert("No swap intent for payout token");
             }
             swapTokens[foundIndex] = payouts[i].token;
             swapAmounts[foundIndex] += payouts[i].amount;
-            IERC20(payouts[i].token).safeTransfer(payouts[i].recipient, payouts[i].amount);
+            IERC20(payouts[i].token).safeTransfer(
+                payouts[i].receiver,
+                payouts[i].amount
+            );
             emit PaymentExecuted(
                 msg.sender,
-                payouts[i].recipient,
+                payouts[i].receiver,
                 payouts[i].token,
                 payouts[i].amount,
                 payouts[i].memo
@@ -533,16 +628,30 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         // ensure that we received enough tokens to cover the payouts and fees
         for (uint i = 0; i < swapTokens.length; i++) {
             bool found = false;
-            for(uint j = 0; j < payoutSummary.length; j++) {
-                if(swapTokens[i] == payoutSummary[j].path[payoutSummary[j].path.length - 1]) { 
-                    found=true;
-                    if(swapAmounts[i] <= payoutSummary[j].amountOut) {
-                        require((payoutSummary[j].amountOut -  swapAmounts[i]) * 10000 / payoutSummary[j].amountOut <= feeBps, "Fee exceeds maximum");
-                       IERC20(swapTokens[i]).safeTransfer(feeReceiver, (payoutSummary[j].amountOut - swapAmounts[i]));
+            for (uint j = 0; j < payoutSummary.length; j++) {
+                if (
+                    swapTokens[i] ==
+                    payoutSummary[j].path[payoutSummary[j].path.length - 1]
+                ) {
+                    found = true;
+                    if (swapAmounts[i] <= payoutSummary[j].amountOut) {
+                        require(
+                            ((payoutSummary[j].amountOut - swapAmounts[i]) *
+                                10000) /
+                                payoutSummary[j].amountOut <=
+                                feeBps,
+                            "Fee exceeds maximum"
+                        );
+                        IERC20(swapTokens[i]).safeTransfer(
+                            feeReceiver,
+                            (payoutSummary[j].amountOut - swapAmounts[i])
+                        );
                     } else {
-                        revert("Insufficient amount received from swap for payout");
+                        revert(
+                            "Insufficient amount received from swap for payout"
+                        );
                     }
-                    
+
                     break;
                 }
                 // if(payoutSummary[j].path.length == 0 && payoutSummary[j].amountOut == 0) {
@@ -551,7 +660,231 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
             }
             require(found, "No swap intent for payout token");
         }
+        emit BatchPaid(batchHash, tokenIn, totalAmountIn, msg.sender);
+    }
 
+    function createMerkleBatch(
+        address merkleBatchPayoutContract,
+        BatchPaySummary calldata payoutSummary,
+        bytes32 batchHash,
+        uint256 timestamp,
+        address signer,
+        bytes32 merkleRoot,
+        uint256 creatorWithdrawDate,
+        bytes calldata signature,
+        uint fundingAmount,
+        uint256 swapDeadline
+    ) public payable nonReentrant {
+        require(
+            merkleBatchPayoutContract != address(0),
+            "Invalid Merkle batch payout contract"
+        );
+        require(
+            supportMerkleBatchPayoutContracts[merkleBatchPayoutContract],
+            "Unsupported Merkle batch payout contract"
+        );
+        require(signer != address(0), "Invalid signer");
+        require(merkleRoot != bytes32(0), "Invalid merkle root");
+         require(
+            payoutSummary.path.length > 1,
+            "Swap intent must include funding token and output token"
+        );
+        address fundingToken =  payoutSummary.path[payoutSummary.path.length - 1];
+        require(fundingToken != address(0), "Invalid funding token");
+        require(signature.length > 0, "signature is required");
+
+        require(
+            creatorWithdrawDate > block.timestamp,
+            "Creator withdraw date must be in future"
+        );
+    
+
+        uint256 amountOut = payoutSummary.amountOut;
+       
+       
+        require(
+            payoutSummary.amountOut > 0,
+            "Funding amount must be greater than 0"
+        );
+
+       address tokenIn = payoutSummary.path[0];
+
+        if (tokenIn == address(0x0) || tokenIn == address(IUniswapV2Router(router).WETH())) {
+            // ETH swap
+            require(
+                msg.value >= payoutSummary.amountIn,
+                "Insufficient ETH sent"
+            );
+            uint[] memory amounts = IUniswapV2Router(router)
+                .swapETHForExactTokens{value: payoutSummary.amountIn}(
+                payoutSummary.amountOut,
+                payoutSummary.path,
+                address(this),
+                swapDeadline
+            );
+            if (amounts[0] < payoutSummary.amountIn) {
+                // Refund unused ETH
+                (bool success, ) = payable(msg.sender).call{
+                    value: payoutSummary.amountIn - amounts[0]
+                }("");
+                require(success, "ETH refund failed");
+            }
+        } else {
+            // Token swap or direct transfer
+            if (tokenIn != payoutSummary.path[payoutSummary.path.length - 1]) {
+                // Swap needed: pull tokenIn, approve router, execute swap
+                IERC20(tokenIn).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    payoutSummary.amountIn
+                );
+                IERC20(tokenIn).safeIncreaseAllowance(router, payoutSummary.amountIn);
+
+                uint[] memory amounts = IUniswapV2Router(router)
+                    .swapTokensForExactTokens(
+                        payoutSummary.amountOut,
+                        payoutSummary.amountIn,
+                        payoutSummary.path,
+                        address(this),
+                        swapDeadline
+                    );
+                if (amounts[0] > 0 && amounts[0] < payoutSummary.amountIn) {
+                    // Refund unused tokens
+                    IERC20(tokenIn).safeTransfer(
+                        msg.sender,
+                        payoutSummary.amountIn - amounts[0]
+                    );
+                }
+            } else {
+                // No swap needed: directly pull fundingToken
+                IERC20(fundingToken).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    amountOut
+                );
+            }
+        }
+        
+        require(
+            amountOut >= fundingAmount,
+            "Amount out must be greater than funding amount"
+        );
+
+       
+
+       
+
+        if (amountOut > fundingAmount) {
+            uint256 feeAmount = amountOut - fundingAmount;
+            uint256 maxAllowedFee = (amountOut * maxFeeBps) / 10000;
+
+            if (feeAmount > maxAllowedFee) {
+                IERC20(fundingToken).safeTransfer(feeReceiver, maxAllowedFee);
+                IERC20(fundingToken).safeTransfer(
+                    msg.sender,
+                    feeAmount - maxAllowedFee
+                );
+            } else {
+                IERC20(fundingToken).safeTransfer(feeReceiver, feeAmount);
+            }
+        }
+
+        IERC20(fundingToken).safeIncreaseAllowance(
+            merkleBatchPayoutContract,
+            fundingAmount
+        );
+
+        IMerkleBatchPayout(merkleBatchPayoutContract).createBatch(
+            batchHash,
+            timestamp,
+            signer,
+            merkleRoot,
+            creatorWithdrawDate,
+            fundingToken,
+            fundingAmount,
+            signature
+        );
+
+        IERC20(fundingToken).forceApprove(merkleBatchPayoutContract, 0);
+    }
+
+    function claimMerkleBatchPayment(
+        address merkleBatchPayoutContract,
+        bytes32 batchId,
+        address receiverAddress,
+        uint256 amount,
+        uint256 claimDate,
+        string calldata memo,
+        bytes32[] calldata merkleProof
+    ) external nonReentrant {
+        require(
+            merkleBatchPayoutContract != address(0),
+            "Invalid Merkle batch payout contract"
+        );
+        require(
+            supportMerkleBatchPayoutContracts[merkleBatchPayoutContract],
+            "Unsupported Merkle batch payout contract"
+        );
+
+        IMerkleBatchPayout.Batch memory batch = IMerkleBatchPayout(
+            merkleBatchPayoutContract
+        ).getBatch(batchId);
+        require(batch.exists, "Batch does not exist");
+
+        IMerkleBatchPayout(merkleBatchPayoutContract).claimPayment(
+            batchId,
+            receiverAddress,
+            amount,
+            claimDate,
+            memo,
+            merkleProof
+        );
+
+        emit PaymentExecuted(
+            msg.sender,
+            receiverAddress,
+            batch.fundingToken,
+            amount,
+            memo
+        );
+    }
+
+    function addFundsToMerkleBatch(
+        address merkleBatchPayoutContract,
+        bytes32 batchId,
+        uint256 amount
+    ) external nonReentrant {
+        require(
+            merkleBatchPayoutContract != address(0),
+            "Invalid Merkle batch payout contract"
+        );
+        require(
+            supportMerkleBatchPayoutContracts[merkleBatchPayoutContract],
+            "Unsupported Merkle batch payout contract"
+        );
+        require(amount > 0, "Amount must be greater than 0");
+
+        IMerkleBatchPayout.Batch memory batch = IMerkleBatchPayout(
+            merkleBatchPayoutContract
+        ).getBatch(batchId);
+        require(batch.exists, "Batch does not exist");
+
+        IERC20(batch.fundingToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            amount
+        );
+        IERC20(batch.fundingToken).safeIncreaseAllowance(
+            merkleBatchPayoutContract,
+            amount
+        );
+
+        IMerkleBatchPayout(merkleBatchPayoutContract).addFundsToBatch(
+            batchId,
+            amount
+        );
+
+        IERC20(batch.fundingToken).forceApprove(merkleBatchPayoutContract, 0);
     }
 
     /**
