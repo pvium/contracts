@@ -10,7 +10,7 @@ import { ethers } from "hardhat";
 const TOKEN_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"; // Token to swap
 const ETH_AMOUNT = "0"; // Exact amount of ETH you want to receive
 const MAX_TOKEN_AMOUNT = "50.25"; // Max tokens willing to spend (set to "0" to auto-calculate with 1% buffer)
-const UNISWAP_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
+const UNISWAP_V2_ROUTER = '0x1689E7B1F10000AE47eBfE339a4f69dECd19F602';
 
 // Uniswap V2 Router ABI (minimal interface)
 const ROUTER_ABI = [

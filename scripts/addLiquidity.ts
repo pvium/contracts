@@ -1,9 +1,9 @@
 import { ethers } from "hardhat";
 
 // Configuration - Update these values
-const TOKEN_ADDRESS = "0x9d0C28036AC12d2150a23DE40Bc4A92f7Aa1A79E"; // Replace with your token address
-const TOKEN_AMOUNT = "0"; // Amount of tokens to add (set to "0" to auto-calculate based on ETH_AMOUNT)
-const ETH_AMOUNT = "0.0321"; // Amount of ETH to add
+const TOKEN_ADDRESS = "0x7dCEd3bFcC97948a665BB665a5D7eEfdfce39C3A"; // Replace with your token address
+const TOKEN_AMOUNT = "1000000"; // 1 million tokens
+const ETH_AMOUNT = "0.001"; // 0.001 ETH - Ratio: 1 million tokens per 0.001 ETH
 
 // Uniswap V2 Router on Base Sepolia
 const UNISWAP_V2_ROUTER = "0x1689E7B1F10000AE47eBfE339a4f69dECd19F602";
@@ -159,10 +159,13 @@ async function main() {
   console.log("└─ Slippage: 0.5%");
   console.log();
 
-  const amountTokenMin = (tokenAmountWei * 995n) / 1000n; // 0.5% slippage
-  const amountETHMin = (ethers.parseEther(ETH_AMOUNT) * 995n) / 1000n; // 0.5% slippage
+  // For pools with only MINIMUM_LIQUIDITY, we need to set mins to 0
+  // to override slippage protection since we're establishing a new ratio
+  const amountTokenMin = 0n;
+  const amountETHMin = 0n;
   const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes
 
+  console.log("⚠ Setting min amounts to 0 to establish new price ratio");
   console.log("Sending transaction...");
   const tx = await router.addLiquidityETH(
     TOKEN_ADDRESS,

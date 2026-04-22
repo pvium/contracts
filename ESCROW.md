@@ -120,9 +120,9 @@ Get project address by unique ID (app + projectId).
 
 ---
 
-#### computeProjectAddress
+#### computeaccountAddress
 ```solidity
-function computeProjectAddress(
+function computeaccountAddress(
   CreateProjectPayload payload,
   address appAddress
 ) view returns (address)
@@ -308,7 +308,7 @@ For each payout, fees are calculated and transferred as follows:
 - Remaining amount is transferred to vendor
 
 **Gas Optimization:**
-- Signature hashes only appId, projectAddress, and claimIds (not full payload)
+- Signature hashes only appId, accountAddress, and claimIds (not full payload)
 - Fees are accumulated across all claims in the batch
 - Single transfer to app fee address (instead of N transfers)
 - Single transfer to Pvium fee address (instead of N transfers)
@@ -537,7 +537,7 @@ Returns deterministic project address
 ### 2. Setup Phase (Before Activation)
 ```
 App → Project.addVendors([vendor1, vendor2, ...])
-Owner → Token.approve(projectAddress, amount)
+Owner → Token.approve(accountAddress, amount)
 Owner → Project.fundProject(amount)
 ```
 
