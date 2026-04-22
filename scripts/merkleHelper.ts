@@ -2,6 +2,27 @@ import { ethers } from "hardhat";
 import { MerkleTree } from "merkletreejs";
 import keccak256 from "keccak256";
 
+const HARDHAT_DEFAULT_MNEMONIC =
+  "test test test test test test test test test test test junk";
+
+function getRawSigningWallet(
+  signerAddress: string
+): ethers.HDNodeWallet | null {
+  for (let index = 0; index < 20; index += 1) {
+    const wallet = ethers.HDNodeWallet.fromPhrase(
+      HARDHAT_DEFAULT_MNEMONIC,
+      undefined,
+      `m/44'/60'/0'/0/${index}`
+    );
+
+    if (wallet.address.toLowerCase() === signerAddress.toLowerCase()) {
+      return wallet;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Payment entry for a batch
  */
@@ -15,12 +36,12 @@ export interface PaymentEntry {
 /**
  * Generate a leaf hash from payment parameters
  * Must match the contract's leaf generation: keccak256(abi.encodePacked(...))
- * Includes batchId to prevent cross-batch proof reuse
+ * Uses batchHash (not batchId) to prevent cross-batch proof reuse
  */
-export function generateLeafHash(batchId: string, entry: PaymentEntry): Buffer {
+export function generateLeafHash(batchHash: string, entry: PaymentEntry): Buffer {
   const encoded = ethers.solidityPacked(
     ["bytes32", "address", "uint256", "uint256", "string"],
-    [batchId, entry.receiverAddress, entry.amount, entry.claimableDate, entry.memo]
+    [batchHash, entry.receiverAddress, entry.amount, entry.claimableDate, entry.memo]
   );
   return Buffer.from(keccak256(encoded));
 }
@@ -103,16 +124,32 @@ export async function signBatchHash(
   fundingToken: string,
   fundingAmount: bigint,
   timestamp: number,
-  signer: ethers.Signer
+  signer: ethers.Signer,
+  withdrawalWallet?: string
 ): Promise<string> {
+  const signerAddress =
+    (signer as any).address || (await signer.getAddress());
+  const withdrawer = withdrawalWallet || ethers.ZeroAddress;
   const packed = ethers.solidityPacked(
-    ["bytes32", "bytes32", "address", "uint256", "uint256"],
-    [batchHash, merkleRoot, fundingToken, fundingAmount, timestamp]
+    ["bytes32", "bytes32", "address"],
+    [batchHash, merkleRoot, withdrawer]
   );
   const messageHash = ethers.keccak256(packed);
-  // Note: ethers.Signer.signMessage automatically prefixes with "\x19Ethereum Signed Message:\n32"
-  const signature = await signer.signMessage(ethers.getBytes(messageHash));
-  return signature;
+
+  const rawSigningWallet = getRawSigningWallet(signerAddress);
+
+  if (rawSigningWallet) {
+    return rawSigningWallet.signingKey.sign(messageHash).serialized;
+  }
+
+  const provider = signer.provider;
+
+  if (!provider) {
+    throw new Error("Signer provider is required for raw signing");
+  }
+
+  // Fallback for non-default test accounts.
+  return await provider.send("eth_sign", [signerAddress, messageHash]);
 }
 
 /**
@@ -125,35 +162,51 @@ export async function generateBatchData(
   fundingToken: string,
   fundingAmount: bigint,
   timestamp: number,
-  chainId: number
+  chainId: number,
+  gracePeriod: number = 0,
+  disapprovalDeadline: number = 0
 ) {
-  // Generate batch hash
-  const batchHash = generateBatchHash(payments, salt);
+  // Generate user batch hash (this is what gets passed as _batchId to createBatch)
+  const userBatchId = generateBatchHash(payments, salt);
 
   // Get signer address
-  const signerAddress = await signer.getAddress();
+  const signerAddress =
+    (signer as any).address || (await signer.getAddress());
 
-  // Calculate batchId (needed for leaf generation)
-  const batchId = ethers.keccak256(
-    ethers.solidityPacked(["address", "bytes32", "uint256"], [signerAddress, batchHash, chainId])
+  // Calculate the contract's internal batchHash (same as contract does)
+  // bytes32 batchHash = keccak256(abi.encode(_batchId, fundingToken, gracePeriod, disapprovalDeadline, timestamp, block.chainid));
+  const contractBatchHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["bytes32", "address", "uint256", "uint256", "uint256", "uint256"],
+      [userBatchId, fundingToken, gracePeriod, disapprovalDeadline, timestamp, chainId]
+    )
   );
 
-  // Generate merkle tree (now with batchId)
-  const tree = generateMerkleTree(batchId, payments);
+  // Calculate batchId (this is the mapping key)
+  // bytes32 batchId = keccak256(abi.encodePacked(signer, batchHash));
+  const batchId = ethers.keccak256(
+    ethers.solidityPacked(["address", "bytes32"], [signerAddress, contractBatchHash])
+  );
+
+  // Generate merkle tree using the contract's internal batchHash
+  const tree = generateMerkleTree(contractBatchHash, payments);
   const merkleRoot = getMerkleRoot(tree);
 
-  // Sign the batch
+  // Sign the batch (with withdrawalWallet = address(0))
+  // Note: Contract expects signature of (contractBatchHash, merkleRoot, withdrawalWallet)
   const signature = await signBatchHash(
-    batchHash,
+    contractBatchHash,  // Use the contract's internal batchHash, not userBatchId
     merkleRoot,
     fundingToken,
     fundingAmount,
     timestamp,
-    signer
+    signer,
+    ethers.ZeroAddress
   );
 
   return {
-    batchHash,
+    batchHash: userBatchId,  // This is what gets passed to createBatch as _batchId
+    contractBatchHash,        // This is the internal batchHash used for leaves
     merkleRoot,
     signature,
     signerAddress,

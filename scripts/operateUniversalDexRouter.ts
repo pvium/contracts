@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-//import { deployConfig } from "./deployUniversalDexRouter";
+import { deployConfig } from "./deployUniversalDexRouter";
 
 /**
  * Update the supported MerkleBatchPayout contract address
@@ -284,14 +284,43 @@ export async function updateMerkleBatchFromConfig(
   await updateMerkleBatchContract(routerAddress, config.merkleBatchContract, supported);
 }
 
+/**
+ * Enable a new MerkleBatchPayout contract and optionally disable the previous one.
+ * The router supports multiple contracts, so "setting" a new one means enabling the
+ * new address. Pass oldMerkleBatchPayoutAddress if you also want to disable the prior contract.
+ */
+export async function setNewMerkleBatchContract(
+  routerAddress: string,
+  newMerkleBatchPayoutAddress: string,
+  oldMerkleBatchPayoutAddress?: string
+) {
+  console.log("╔════════════════════════════════════════════════════════════════╗");
+  console.log("║              Setting New Merkle Batch Contract                ║");
+  console.log("╚════════════════════════════════════════════════════════════════╝");
+  console.log();
+
+  if (
+    oldMerkleBatchPayoutAddress &&
+    oldMerkleBatchPayoutAddress.toLowerCase() ===
+      newMerkleBatchPayoutAddress.toLowerCase()
+  ) {
+    throw new Error("OLD_MERKLE_ADDRESS and NEW_MERKLE_ADDRESS must be different");
+  }
+
+  await updateMerkleBatchContract(routerAddress, newMerkleBatchPayoutAddress, true);
+
+  if (oldMerkleBatchPayoutAddress) {
+    console.log();
+    console.log("Disabling previous MerkleBatchPayout contract...");
+    await updateMerkleBatchContract(routerAddress, oldMerkleBatchPayoutAddress, false);
+  }
+}
+
 // Main function for CLI usage
 async function main() {
+  const operation = process.env.OPERATION;
 
-  console.log(await updateMerkleBatchContract('0x94d2f493FE42019b39A98A067BbF456B8aed0992', '0x6591B0E35091Af9F3096A4CeE91afE64718DdC77', true));
-  return;
-  const args = process.argv.slice(2);
-
-  if (args.length === 0) {
+  if (!operation) {
     console.log("Usage:");
     console.log("  npx hardhat run scripts/operateUniversalDexRouter.ts --network <network>");
     console.log();
@@ -299,6 +328,7 @@ async function main() {
     console.log("  OPERATION=info ROUTER_ADDRESS=<address>");
     console.log("  OPERATION=update-merkle ROUTER_ADDRESS=<address> MERKLE_ADDRESS=<address> SUPPORTED=<true|false>");
     console.log("  OPERATION=update-merkle-config ROUTER_ADDRESS=<address> SUPPORTED=<true|false>");
+    console.log("  OPERATION=set-new-merkle ROUTER_ADDRESS=<address> NEW_MERKLE_ADDRESS=<address> [OLD_MERKLE_ADDRESS=<address>]");
     console.log("  OPERATION=update-fee-receiver ROUTER_ADDRESS=<address> FEE_RECEIVER=<address>");
     console.log("  OPERATION=check-role ROUTER_ADDRESS=<address> ADDRESS=<address> ROLE=<ADMIN|DEFAULT_ADMIN>");
     console.log("  OPERATION=check-merkle ROUTER_ADDRESS=<address> MERKLE_ADDRESS=<address>");
@@ -307,10 +337,10 @@ async function main() {
     console.log("  OPERATION=info ROUTER_ADDRESS=0x123... npx hardhat run scripts/operateUniversalDexRouter.ts");
     console.log("  OPERATION=update-merkle ROUTER_ADDRESS=0x123... MERKLE_ADDRESS=0x456... SUPPORTED=true npx hardhat run scripts/operateUniversalDexRouter.ts");
     console.log("  OPERATION=update-merkle-config ROUTER_ADDRESS=0x123... SUPPORTED=true npx hardhat run scripts/operateUniversalDexRouter.ts --network basetest");
+    console.log("  OPERATION=set-new-merkle ROUTER_ADDRESS=0x123... NEW_MERKLE_ADDRESS=0x456... OLD_MERKLE_ADDRESS=0x789... npx hardhat run scripts/operateUniversalDexRouter.ts");
     process.exit(1);
   }
 
-  const operation = process.env.OPERATION;
   const routerAddress = process.env.ROUTER_ADDRESS;
 
   if (!routerAddress) {
@@ -342,6 +372,22 @@ async function main() {
     case "update-merkle-config": {
       const supported = process.env.SUPPORTED === "true";
       await updateMerkleBatchFromConfig(routerAddress, supported);
+      break;
+    }
+
+    case "set-new-merkle": {
+      const newMerkleAddress = process.env.NEW_MERKLE_ADDRESS;
+      const oldMerkleAddress = process.env.OLD_MERKLE_ADDRESS;
+
+      if (!newMerkleAddress) {
+        throw new Error("NEW_MERKLE_ADDRESS environment variable is required");
+      }
+
+      await setNewMerkleBatchContract(
+        routerAddress,
+        newMerkleAddress,
+        oldMerkleAddress
+      );
       break;
     }
 

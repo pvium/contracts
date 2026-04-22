@@ -115,11 +115,23 @@ contract MockUniswapV2Router {
         uint256 amountIn = amountOut;
         require(amountIn <= amountInMax, "Excessive input amount");
 
-        // Transfer tokens from sender
-        IERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
+        // If input and output tokens are the same, just transfer directly
+        if (path[0] == path[path.length - 1]) {
+            IERC20(path[0]).transferFrom(msg.sender, to, amountIn);
+        } else {
+            // Different tokens: pull input, send output
+            // For testing, we assume the router has enough output tokens
+            IERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
 
-        // Transfer output tokens to recipient
-        IERC20(path[path.length - 1]).transfer(to, amountOut);
+            // Check if router has output tokens, if not transfer input tokens as output
+            uint256 outputBalance = IERC20(path[path.length - 1]).balanceOf(address(this));
+            if (outputBalance >= amountOut) {
+                IERC20(path[path.length - 1]).transfer(to, amountOut);
+            } else {
+                // Fallback: transfer the input tokens as if they were swapped 1:1
+                IERC20(path[0]).transfer(to, amountOut);
+            }
+        }
 
         // Return amounts array
         amounts = new uint256[](path.length);
@@ -144,6 +156,10 @@ contract MockUniswapV2Router {
         // Calculate input needed (simplified: use amountOut as ETH needed)
         uint256 amountIn = amountOut;
         require(amountIn <= msg.value, "Excessive input amount");
+
+        // Check if router has output tokens, if not this will revert
+        uint256 outputBalance = IERC20(path[path.length - 1]).balanceOf(address(this));
+        require(outputBalance >= amountOut, "Insufficient token balance in router");
 
         // Transfer output tokens to recipient
         IERC20(path[path.length - 1]).transfer(to, amountOut);

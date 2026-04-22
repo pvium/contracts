@@ -44,14 +44,20 @@ describe("UniversalDexRouter", function () {
         mockV2Router = await MockV2Router.deploy();
         await mockV2Router.waitForDeployment();
 
-        // Deploy UniversalDexRouter
+        // Deploy MerkleBatchPayout contract first
+        const MerkleBatchPayout = await ethers.getContractFactory("MerkleBatchPayout");
+        merkleBatchPayout = await MerkleBatchPayout.deploy();
+        await merkleBatchPayout.waitForDeployment();
+
+        // Deploy UniversalDexRouter with MerkleBatchPayout address
         const UniversalDexRouter = await ethers.getContractFactory("UniversalDexRouter");
         universalDexRouter = await UniversalDexRouter.deploy(
             await mockV2Router.getAddress(),
             await mockWETH.getAddress(),
             feeReceiver.address,
             owner.address,
-            admin.address
+            admin.address,
+            await merkleBatchPayout.getAddress()
         );
         await universalDexRouter.waitForDeployment();
 
@@ -70,12 +76,7 @@ describe("UniversalDexRouter", function () {
         await mockToken1.connect(user).approve(await universalDexRouter.getAddress(), ethers.MaxUint256);
         await mockToken2.connect(user).approve(await universalDexRouter.getAddress(), ethers.MaxUint256);
 
-        // Deploy MerkleBatchPayout contract
-        const MerkleBatchPayout = await ethers.getContractFactory("MerkleBatchPayout");
-        merkleBatchPayout = await MerkleBatchPayout.deploy();
-        await merkleBatchPayout.waitForDeployment();
-
-        // Add MerkleBatchPayout contract to supported contracts
+        // Add MerkleBatchPayout contract to supported contracts (already set in constructor)
         await universalDexRouter.connect(admin).setSupportedMerkleBatchPayoutContract(
             await merkleBatchPayout.getAddress(),
             true
@@ -116,7 +117,8 @@ describe("UniversalDexRouter", function () {
                     await mockWETH.getAddress(),
                     feeReceiver.address,
                     owner.address,
-                    admin.address
+                    admin.address,
+                    await merkleBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid router address");
         });
@@ -129,7 +131,8 @@ describe("UniversalDexRouter", function () {
                     ethers.ZeroAddress,
                     feeReceiver.address,
                     owner.address,
-                    admin.address
+                    admin.address,
+                    await merkleBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid WETH address");
         });
@@ -142,7 +145,8 @@ describe("UniversalDexRouter", function () {
                     await mockWETH.getAddress(),
                     ethers.ZeroAddress,
                     owner.address,
-                    admin.address
+                    admin.address,
+                    await merkleBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid fee receiver address");
         });
@@ -708,7 +712,9 @@ describe("UniversalDexRouter", function () {
                 await mockToken2.getAddress(),
                 totalAmount,
                 signatureTimestamp,
-                Number(chainId)
+                Number(chainId),
+                creatorWithdrawDate,
+                0
             );
         });
 
@@ -731,6 +737,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -763,6 +771,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -793,6 +803,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -823,6 +835,8 @@ describe("UniversalDexRouter", function () {
                     ethers.ZeroAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -847,6 +861,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     ethers.ZeroHash,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -871,6 +887,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -897,6 +915,8 @@ describe("UniversalDexRouter", function () {
                     batchData.signerAddress,
                     batchData.merkleRoot,
                     creatorWithdrawDate,
+                    0,
+                    ethers.ZeroAddress,
                     batchData.signature,
                     totalAmount,
                     (await time.latest()) + 3600
@@ -987,7 +1007,9 @@ describe("UniversalDexRouter", function () {
                 await mockToken2.getAddress(),
                 totalAmount,
                 signatureTimestamp,
-                Number(chainId)
+                Number(chainId),
+                creatorWithdrawDate,
+                0
             );
 
             // Create the batch first
@@ -1005,6 +1027,8 @@ describe("UniversalDexRouter", function () {
                 batchData.signerAddress,
                 batchData.merkleRoot,
                 creatorWithdrawDate,
+                0,
+                ethers.ZeroAddress,
                 batchData.signature,
                 totalAmount,
                     (await time.latest()) + 3600
@@ -1195,7 +1219,9 @@ describe("UniversalDexRouter", function () {
                 await mockToken2.getAddress(),
                 totalAmount,
                 signatureTimestamp,
-                Number(chainId)
+                Number(chainId),
+                creatorWithdrawDate,
+                0
             );
 
             // Create the batch
@@ -1213,6 +1239,8 @@ describe("UniversalDexRouter", function () {
                 batchData.signerAddress,
                 batchData.merkleRoot,
                 creatorWithdrawDate,
+                0,
+                ethers.ZeroAddress,
                 batchData.signature,
                 totalAmount,
                     (await time.latest()) + 3600

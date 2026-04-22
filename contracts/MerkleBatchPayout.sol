@@ -6,6 +6,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "./interfaces/IMerkleBatchPayout.sol";
 
 
 /**
@@ -22,23 +24,28 @@ contract MerkleBatchPayout is ReentrancyGuard {
         address[] path;
     }
 
-    // Batch information
-    struct Batch {
-        bytes32 merkleRoot;
-        address signer;
-        address fundingToken; // Token used to fund this batch
-        uint256 totalFunded; // Total amount funded for this batch
-        uint256 totalClaimed; // Total amount claimed from this batch
-        uint256 createdAt;
-        uint256 creatorWithdrawDate; // After this date, creator can withdraw remaining funds
-        bool exists;
+    struct ClaimStats {
+        uint total;
+        uint successful;
+        uint canceled;
+        uint totalCount;
+        uint successfulCount;
+        uint canceledCount;
     }
 
+
+
     // Mapping of batchId => Batch info
-    mapping(bytes32 => Batch) public batches;
+    mapping(bytes32 => IMerkleBatchPayout.Batch) public batches;
 
     // Mapping to track claimed payments: batchId => receiver => claimed
-    mapping(bytes32 => mapping(address => bool)) public claimed;
+    mapping(bytes32 => mapping(bytes32 => bool)) public claimed;
+
+    // Mapping to track disabled payment: batchId => leaf => disabled
+    mapping(bytes32 => mapping(bytes32 => bool)) public disabledClaims;
+    mapping(bytes32 => uint256) public withdrawnCanceledFunds;
+    mapping(address => mapping(address => ClaimStats)) public payeeStatsPerToken;
+    mapping(address => mapping(address=>ClaimStats)) public payerStatsPerToken;
 
     // Events
     event BatchCreated(
@@ -46,6 +53,7 @@ contract MerkleBatchPayout is ReentrancyGuard {
         bytes32 indexed batchId,
         bytes32 merkleRoot,
         address indexed signer,
+        address  caller,
         address fundingToken,
         uint256 totalFunded,
         uint256 creatorWithdrawDate
@@ -56,11 +64,12 @@ contract MerkleBatchPayout is ReentrancyGuard {
         address indexed receiver,
         uint256 amount,
         address indexed token,
-        string memo
+        string memoac
     );
 
     event BatchFunded(
         bytes32 indexed batchId,
+        bytes32 indexed batchHash,
         address indexed token,
         uint256 amount
     );
@@ -71,42 +80,52 @@ contract MerkleBatchPayout is ReentrancyGuard {
         uint256 amount
     );
 
+     event ClaimDisabled(
+        bytes32 indexed batchId,
+        bytes32 indexed leaf,
+        address indexed receiver,
+        uint256 timestamp
+    );
+
     /**
      * @dev Create a new batch with direct token funding
-     * @param batchHash Hash of the batch data (for verification)
+     * @param _batchId Hash of the batch data (for verification)
      * @param timestamp Timestamp used in signature
      * @param signer Address who created this batch
      * @param merkleRoot Merkle root of all payments in this batch
-     * @param creatorWithdrawDate Timestamp after which creator can withdraw remaining funds
+     * @param gracePeriod Duration in seconds after which creator cannot withdraw
+     * @param disapprovalDeadline Duration in second before claimDate that creator can withdraw
      * @param fundingToken Token to be used for batch payouts
      * @param amount Amount to fund the batch
      * @param signature Signature of (batchHash, merkleRoot, fundingToken, timestamp)
      */
     function createBatch(
-        bytes32 batchHash,
+        bytes32 _batchId,
         uint256 timestamp,
         address signer,
         bytes32 merkleRoot,
-        uint256 creatorWithdrawDate,
+        uint256 gracePeriod,
+        uint256 disapprovalDeadline,
         address fundingToken,
         uint256 amount,
+        address withdrawalWallet,
         bytes calldata signature
-    ) external  nonReentrant {
+    ) public  nonReentrant returns(bytes32  batchId) {
         require(signer != address(0), "Invalid signer address");
         require(merkleRoot != bytes32(0), "Invalid merkle root");
         require(fundingToken != address(0), "Invalid funding token");
         require(amount > 0, "Amount must be greater than 0");
-        require(creatorWithdrawDate > block.timestamp, "Creator withdraw date must be in future");
         require(signer==msg.sender || signature.length > 0, "Only signer can create batch");
-
+        address withdrawer = withdrawalWallet == address(0x0)?signer:withdrawalWallet ;
         // Generate batchId from signer and batchHash
-        bytes32 batchId = keccak256(abi.encodePacked(signer, batchHash, block.chainid));
+        bytes32 batchHash = keccak256(abi.encode(_batchId, fundingToken, gracePeriod, disapprovalDeadline, timestamp, block.chainid));
+        batchId = keccak256(abi.encodePacked(signer, batchHash));
         require(!batches[batchId].exists, "Batch already exists");
 
-        // Verify signature: raw signature without Ethereum prefix
+        // Verify signature with Ethereum signed message prefix
         if (signature.length > 0) {
             bytes32 messageHash = keccak256(
-                abi.encodePacked(batchHash, merkleRoot, fundingToken, amount, timestamp)
+                abi.encodePacked(batchHash, merkleRoot, withdrawalWallet)
             );
             address recoveredSigner = ECDSA.recover(messageHash, signature);
             require(recoveredSigner == signer, "Invalid signature");
@@ -120,124 +139,46 @@ contract MerkleBatchPayout is ReentrancyGuard {
         );
        
         // Create the batch
-        batches[batchId] = Batch({
+        batches[batchId] = IMerkleBatchPayout.Batch({
+            batchHash: batchHash,
             merkleRoot: merkleRoot,
             signer: signer,
             fundingToken: fundingToken,
             totalFunded: amount,
+            totalCanceled: 0,
             totalClaimed: 0,
             createdAt: block.timestamp,
-            creatorWithdrawDate: creatorWithdrawDate,
-            exists: true
+            gracePeriod: gracePeriod,
+            disapprovalDeadline: disapprovalDeadline,
+            exists: true,
+            claimCount: 0,
+            withdrawalWallet: withdrawer
         });
 
-        emit BatchCreated(batchHash, batchId, merkleRoot, signer, fundingToken, amount, creatorWithdrawDate);
+        emit BatchCreated(batchHash, batchId, merkleRoot, signer, msg.sender, fundingToken, amount, disapprovalDeadline);
     }
 
-    /**
-     * @dev Internal function to execute swap for batch funding
-     * @param summary Swap configuration
-     * @param deadline Swap deadline
-     * @param expectedOutputToken Expected output token
-     * @return amountOut Amount received from swap
-     */
-    // function _executeSwapForBatch(
-    //     BatchPaySummary calldata summary,
-    //     uint256 deadline,
-    //     address expectedOutputToken
-    // ) internal returns (uint256 amountOut) {
-    //     require(summary.path.length >= 2, "Invalid swap path");
-    //     require(
-    //         summary.path[summary.path.length - 1] == expectedOutputToken,
-    //         "Swap output mismatch"
-    //     );
-
-    //     address tokenIn = summary.path[0];
-
-    //     // Handle ETH input
-    //     if (tokenIn == WETH && msg.value > 0) {
-    //         // Swap ETH for exact tokens
-    //         uint[] memory amounts = IUniswapV2Router(router)
-    //             .swapETHForExactTokens{value: summary.amountIn}(
-    //             summary.amountOut,
-    //             summary.path,
-    //             address(this),
-    //             deadline
-    //         );
-
-    //         // Refund unused ETH
-    //         if (amounts[0] < summary.amountIn) {
-    //             (bool success, ) = payable(msg.sender).call{
-    //                 value: summary.amountIn - amounts[0]
-    //             }("");
-    //             require(success, "ETH refund failed");
-    //         }
-
-    //         amountOut = amounts[amounts.length - 1];
-    //     } else {
-    //         // Swap tokens for exact tokens
-    //         IERC20(tokenIn).safeTransferFrom(
-    //             msg.sender,
-    //             address(this),
-    //             summary.amountIn
-    //         );
-    //         IERC20(tokenIn).safeIncreaseAllowance(router, summary.amountIn);
-
-    //         uint[] memory amounts = IUniswapV2Router(router)
-    //             .swapTokensForExactTokens(
-    //             summary.amountOut,
-    //             summary.amountIn,
-    //             summary.path,
-    //             address(this),
-    //             deadline
-    //         );
-
-    //         // Refund unused tokens
-    //         if (amounts[0] < summary.amountIn) {
-    //             IERC20(tokenIn).safeTransfer(
-    //                 msg.sender,
-    //                 summary.amountIn - amounts[0]
-    //             );
-    //         }
-
-    //         // Revoke approval
-    //         IERC20(tokenIn).approve(router, 0);
-
-    //         amountOut = amounts[amounts.length - 1];
-    //     }
-    // }
-
-    /**
-     * @dev Claim a payment from a batch using Merkle proof
-     * @param batchId ID of the batch to claim from
-     * @param receiverAddress Address of the payment receiver
-     * @param amount Amount to be claimed
-     * @param claimDate Unix timestamp when payment becomes claimable
-     * @param memo Memo string for the payment
-     * @param merkleProof Merkle proof validating this payment
-     */
     function claimPayment(
-        bytes32 batchId,
-        address receiverAddress,
-        uint256 amount,
-        uint256 claimDate,
-        string calldata memo,
+        IMerkleBatchPayout.Payment calldata payment,
         bytes32[] calldata merkleProof
-    ) external nonReentrant {
-        Batch storage batch = batches[batchId];
+    ) public nonReentrant returns (bytes32 leaf) {
+        IMerkleBatchPayout.Batch storage batch = batches[payment.batchId];
         require(batch.exists, "Batch does not exist");
-        require(!claimed[batchId][receiverAddress], "Payment already claimed");
-        require(block.timestamp >= claimDate, "Payment not yet claimable");
-        require(
-            batch.totalClaimed + amount <= batch.totalFunded,
-            "Insufficient batch funds"
-        );
+       uint claimEnd = payment.claimDate+batch.gracePeriod;
+        require(block.timestamp >= payment.claimDate, "Payment not yet claimable");
+        if(batch.gracePeriod > 0) {
+             require(block.timestamp <= claimEnd, "Payment past claim end date");
+        }
 
         // Construct the leaf hash from payment parameters
         // Include batchId to prevent cross-batch proof reuse
-        bytes32 leaf = keccak256(
-            abi.encodePacked(batchId, receiverAddress, amount, claimDate, memo)
+        leaf = keccak256(
+            abi.encodePacked(batch.batchHash, payment.receiver, payment.amount, payment.claimDate, payment.memo)
         );
+
+        // Check if already claimed before checking funds (better error message)
+        require(!claimed[payment.batchId][leaf], "Payment already claimed");
+        require(!disabledClaims[payment.batchId][leaf], "Claim disabled");
 
         // Verify the Merkle proof
         require(
@@ -245,14 +186,22 @@ contract MerkleBatchPayout is ReentrancyGuard {
             "Invalid merkle proof"
         );
 
+        uint amount = payment.amount;
+        // Check if there are sufficient funds
+        require(
+            batch.totalClaimed + amount <= batch.totalFunded,
+            "Insufficient batch funds"
+        );
+
         // Mark as claimed
-        claimed[batchId][receiverAddress] = true;
+        claimed[payment.batchId][leaf] = true;
         batch.totalClaimed += amount;
+        batch.claimCount++;
 
         // Transfer the funds
-        IERC20(batch.fundingToken).safeTransfer(receiverAddress, amount);
+        IERC20(batch.fundingToken).safeTransfer(payment.receiver, amount);
 
-        emit PaymentClaimed(batchId, receiverAddress, amount, batch.fundingToken, memo);
+        emit PaymentClaimed(payment.batchId, payment.receiver, amount, batch.fundingToken, payment.memo);
     }
 
     /**
@@ -264,7 +213,7 @@ contract MerkleBatchPayout is ReentrancyGuard {
         bytes32 batchId,
         uint256 amount
     ) external nonReentrant {
-        Batch storage batch = batches[batchId];
+        IMerkleBatchPayout.Batch storage batch = batches[batchId];
         require(batch.exists, "Batch does not exist");
 
         IERC20(batch.fundingToken).safeTransferFrom(
@@ -275,29 +224,91 @@ contract MerkleBatchPayout is ReentrancyGuard {
 
         batch.totalFunded += amount;
 
-        emit BatchFunded(batchId, batch.fundingToken, amount);
+        emit BatchFunded(batchId, batch.batchHash, batch.fundingToken, amount);
     }
 
     /**
      * @dev Withdraw remaining funds from batch (only batch creator, after creatorWithdrawDate)
      * @param batchId ID of the batch to withdraw from
      */
-    function withdrawRemainingFunds(bytes32 batchId) external nonReentrant {
-        Batch storage batch = batches[batchId];
+    function withdrawCanceledFunds(bytes32 batchId) external nonReentrant {
+        IMerkleBatchPayout.Batch storage batch = batches[batchId];
         require(batch.exists, "Batch does not exist");
-        require(batch.signer == msg.sender, "Only batch creator can withdraw");
-        require(block.timestamp >= batch.creatorWithdrawDate, "Creator withdraw date not reached yet");
+        require(batch.signer == msg.sender || batch.withdrawalWallet == msg.sender, "Only batch creator can withdraw");
 
-        uint256 remainingFunds = batch.totalFunded - batch.totalClaimed;
-        require(remainingFunds > 0, "No funds to withdraw");
+       //  require(block.timestamp <= batch.creatorWithdrawDate, "Creator withdraw date exceeded");
 
-        // Update claimed to prevent re-withdrawal
-        batch.totalClaimed = batch.totalFunded;
+        uint256 newCanceledFunds = batch.totalCanceled - withdrawnCanceledFunds[batchId];
+        require(newCanceledFunds > 0, "No funds to withdraw");
 
+        withdrawnCanceledFunds[batchId] += newCanceledFunds;
+        batch.totalClaimed += newCanceledFunds;
+        require(batch.totalClaimed <= batch.totalFunded, "Insufficient batch funds");
+        address withdrwalAddress = batch.withdrawalWallet;
+
+        if(withdrwalAddress == address(0x0)) {
+            withdrwalAddress = batch.signer;
+        }
         // Transfer remaining funds to batch creator
-        IERC20(batch.fundingToken).safeTransfer(msg.sender, remainingFunds);
+        IERC20(batch.fundingToken).safeTransfer(withdrwalAddress,newCanceledFunds);
 
-        emit BatchWithdrawn(batchId, msg.sender, remainingFunds);
+        emit BatchWithdrawn(batchId, msg.sender, newCanceledFunds);
+    }
+
+      function cancelClaimMulti(
+        IMerkleBatchPayout.Payment[] calldata payments,
+        bytes32[][] calldata merkleProofs
+    ) public nonReentrant {
+        require(payments.length == merkleProofs.length, "Invalid proof count");
+        for(uint i; i < payments.length; i++ ) {
+            _cancelClaim(payments[i], merkleProofs[i]);
+        }
+      }
+
+  
+    function cancelClaim(
+        IMerkleBatchPayout.Payment calldata payment,
+        bytes32[] calldata merkleProof
+    ) public nonReentrant {
+        _cancelClaim(payment, merkleProof);
+    }
+
+    function _cancelClaim(
+        IMerkleBatchPayout.Payment calldata payment,
+        bytes32[] calldata merkleProof
+    ) private {
+        IMerkleBatchPayout.Batch storage batch = batches[payment.batchId];
+        require(batch.exists, "Batch does not exist");
+        require(batch.signer == msg.sender || batch.withdrawalWallet == msg.sender, "Only batch creator can withdraw");
+
+        if(block.timestamp < payment.claimDate ) {
+            require( block.timestamp < payment.claimDate - batch.disapprovalDeadline, "Claim grace period not reached");
+        } else {
+            require( batch.gracePeriod > 0 && block.timestamp > payment.claimDate + batch.gracePeriod, "Claim grace period not reach");
+        }
+
+        // Construct the leaf hash from payment parameters
+        // Include batchId to prevent cross-batch proof reuse
+        bytes32 leaf = keccak256(
+            abi.encodePacked(batch.batchHash, payment.receiver, payment.amount, payment.claimDate, payment.memo)
+        );
+         require(
+            MerkleProof.verify(merkleProof, batch.merkleRoot, leaf),
+            "Invalid merkle proof"
+        );
+         require(!disabledClaims[payment.batchId][leaf], "Claim already disabled");
+         require(!claimed[payment.batchId][leaf], "Payment already claimed");
+        disabledClaims[payment.batchId][leaf] = true;
+        batch.totalCanceled += payment.amount;
+
+    
+            // payerStatsPerToken[batch.signer][batch.fundingToken].canceled  += amount;
+            payerStatsPerToken[batch.signer][batch.fundingToken].canceledCount++;
+            payeeStatsPerToken[payment.receiver][batch.fundingToken].canceledCount++;
+            payeeStatsPerToken[payment.receiver][batch.fundingToken].canceled+= payment.amount;
+        
+
+        emit ClaimDisabled(payment.batchId, leaf, payment.receiver, block.timestamp);
     }
 
     /**
@@ -305,21 +316,21 @@ contract MerkleBatchPayout is ReentrancyGuard {
      * @param batchId ID of the batch
      * @return Batch struct containing batch details
      */
-    function getBatch(bytes32 batchId) external view returns (Batch memory) {
+    function getBatch(bytes32 batchId) external view returns (IMerkleBatchPayout.Batch memory) {
         return batches[batchId];
     }
 
     /**
      * @dev Check if a payment has been claimed
      * @param batchId ID of the batch
-     * @param receiver Address of the receiver
+     * @param leaf Address of the receiver
      * @return True if claimed, false otherwise
      */
     function isClaimed(
         bytes32 batchId,
-        address receiver
+        bytes32 leaf
     ) external view returns (bool) {
-        return claimed[batchId][receiver];
+        return claimed[batchId][leaf];
     }
 
     /**
@@ -328,8 +339,9 @@ contract MerkleBatchPayout is ReentrancyGuard {
      * @return Remaining unclaimed funds
      */
     function getRemainingFunds(bytes32 batchId) external view returns (uint256) {
-        Batch storage batch = batches[batchId];
+        IMerkleBatchPayout.Batch storage batch = batches[batchId];
         require(batch.exists, "Batch does not exist");
+        
         return batch.totalFunded - batch.totalClaimed;
     }
 }
