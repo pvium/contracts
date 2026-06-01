@@ -8,6 +8,7 @@ export const deployConfig: Record<
     wethAddress: string;
     feeReciever: string;
     merkleBatchContract: string;
+    escrowBatchContract: string;
   }
 > = {
   84532: {
@@ -16,18 +17,21 @@ export const deployConfig: Record<
     wethAddress: '0x4200000000000000000000000000000000000006',
     feeReciever: '0x3fd6ecdcd225c3de0e073b337c4cbac5342e2ac8',
     merkleBatchContract: '0x71F2c5E6C46B3C35222D6614BD6b7df02b6E7ac8',
+    escrowBatchContract: '0xb18C76B5fa836990dd4FE7c462Ccb50155C5b1c6',
   },
   8453: {
     uniswapV2Router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24', // Uniswap V2 Router on Base Mainnet
     wethAddress: '0x4200000000000000000000000000000000000006', // WETH on Base Mainnet
     feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
     merkleBatchContract: '0xcAc04389336e0Df584B34Ce3386CcB8379Cd8D15',
+    escrowBatchContract: process.env.ESCROW_BATCH_CONTRACT || '',
   },
   56: {
     uniswapV2Router: '0x10ED43C718714eb63d5aA57B78B54704E256024E', // PancakeSwap V2 Router on BSC Mainnet
     wethAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB on BSC Mainnet
     feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
     merkleBatchContract: '0xcAc04389336e0Df584B34Ce3386CcB8379Cd8D15',
+    escrowBatchContract: process.env.ESCROW_BATCH_CONTRACT || '',
   },
 };
 
@@ -70,13 +74,28 @@ async function main() {
 
   // Set fee receiver to deployer if not specified
   const feeReceiver = FEE_RECEIVER || deployer.address;
-  const constructorArgs: [string, string, string, string, string, string] = [
+  const ESCROW_BATCH_CONTRACT = conf.escrowBatchContract;
+  if (!ESCROW_BATCH_CONTRACT) {
+    throw new Error(
+      'ESCROW_BATCH_CONTRACT must be set for router deployment. Run scripts/deployEscrowBatchPayout.ts first.',
+    );
+  }
+  const constructorArgs: [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ] = [
     UNISWAP_V2_ROUTER,
     WETH_ADDRESS,
     feeReceiver,
     deployer.address, // defaultAdmin
     deployer.address, // admin
     conf.merkleBatchContract,
+    ESCROW_BATCH_CONTRACT,
   ];
 
   console.log('Constructor Parameters:');
@@ -84,7 +103,8 @@ async function main() {
   console.log('├─ WETH:', WETH_ADDRESS);
   console.log('├─ Fee Receiver:', feeReceiver);
   console.log('├─ Default Admin:', deployer.address);
-  console.log('└─ MerkelTreeContract:', conf.merkleBatchContract);
+  console.log('├─ MerkleBatchContract:', conf.merkleBatchContract);
+  console.log('├─ EscrowBatchContract:', ESCROW_BATCH_CONTRACT);
   console.log('└─ Admin:', deployer.address);
   console.log();
 
@@ -165,10 +185,11 @@ async function main() {
   console.log();
 
   console.log('Next steps:');
-  console.log('1. Deploy MerkleBatchPayout contract (if not already deployed)');
-  console.log('2. Register MerkleBatchPayout contract:');
   console.log(
-    '   await universalDexRouter.setSupportedMerkleBatchPayoutContract(merkleBatchPayoutAddress, true)',
+    '1. Confirm MerkleBatchPayout and EscrowBatchPayout are the intended constructor addresses',
+  );
+  console.log(
+    '2. Use admin support methods only when adding or replacing payout contracts later',
   );
 }
 

@@ -21,6 +21,7 @@ describe("UniversalDexRouter", function () {
     let ADMIN_ROLE: any;
     let DEFAULT_ADMIN_ROLE: any;
     let merkleBatchPayout: any;
+    let escrowBatchPayout: any;
     let batchSigner: any;
     let receiver1: any;
     let receiver2: any;
@@ -49,6 +50,10 @@ describe("UniversalDexRouter", function () {
         merkleBatchPayout = await MerkleBatchPayout.deploy();
         await merkleBatchPayout.waitForDeployment();
 
+        const EscrowBatchPayout = await ethers.getContractFactory("EscrowBatchPayout");
+        escrowBatchPayout = await EscrowBatchPayout.deploy();
+        await escrowBatchPayout.waitForDeployment();
+
         // Deploy UniversalDexRouter with MerkleBatchPayout address
         const UniversalDexRouter = await ethers.getContractFactory("UniversalDexRouter");
         universalDexRouter = await UniversalDexRouter.deploy(
@@ -57,7 +62,8 @@ describe("UniversalDexRouter", function () {
             feeReceiver.address,
             owner.address,
             admin.address,
-            await merkleBatchPayout.getAddress()
+            await merkleBatchPayout.getAddress(),
+            await escrowBatchPayout.getAddress()
         );
         await universalDexRouter.waitForDeployment();
 
@@ -109,6 +115,19 @@ describe("UniversalDexRouter", function () {
             expect(await universalDexRouter.hasRole(ADMIN_ROLE, admin.address)).to.be.true;
         });
 
+        it("Should register initial payout contracts from constructor", async function () {
+            expect(
+                await universalDexRouter.supportMerkleBatchPayoutContracts(
+                    await merkleBatchPayout.getAddress()
+                )
+            ).to.be.true;
+            expect(
+                await universalDexRouter.supportEscrowBatchPayoutContracts(
+                    await escrowBatchPayout.getAddress()
+                )
+            ).to.be.true;
+        });
+
         it("Should revert with invalid router address", async function () {
             const UniversalDexRouter = await ethers.getContractFactory("UniversalDexRouter");
             await expect(
@@ -118,7 +137,8 @@ describe("UniversalDexRouter", function () {
                     feeReceiver.address,
                     owner.address,
                     admin.address,
-                    await merkleBatchPayout.getAddress()
+                    await merkleBatchPayout.getAddress(),
+                    await escrowBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid router address");
         });
@@ -132,7 +152,8 @@ describe("UniversalDexRouter", function () {
                     feeReceiver.address,
                     owner.address,
                     admin.address,
-                    await merkleBatchPayout.getAddress()
+                    await merkleBatchPayout.getAddress(),
+                    await escrowBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid WETH address");
         });
@@ -146,7 +167,8 @@ describe("UniversalDexRouter", function () {
                     ethers.ZeroAddress,
                     owner.address,
                     admin.address,
-                    await merkleBatchPayout.getAddress()
+                    await merkleBatchPayout.getAddress(),
+                    await escrowBatchPayout.getAddress()
                 )
             ).to.be.revertedWith("Invalid fee receiver address");
         });
@@ -1249,6 +1271,11 @@ describe("UniversalDexRouter", function () {
 
         it("Should successfully add funds to an existing Merkle batch", async function () {
             const additionalAmount = ethers.parseUnits("50", 18);
+            const payoutSummary = {
+                amountIn: additionalAmount,
+                amountOut: additionalAmount,
+                path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+            };
 
             const batchBefore = await merkleBatchPayout.getBatch(batchData.batchId);
             const totalFundedBefore = batchBefore.totalFunded;
@@ -1257,11 +1284,14 @@ describe("UniversalDexRouter", function () {
                 universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                     await merkleBatchPayout.getAddress(),
                     batchData.batchId,
-                    additionalAmount
+                    payoutSummary,
+                    additionalAmount,
+                    (await time.latest()) + 3600
                 )
             ).to.emit(merkleBatchPayout, "BatchFunded")
                 .withArgs(
                     batchData.batchId,
+                    batchData.contractBatchHash,
                     await mockToken2.getAddress(),
                     additionalAmount
                 );
@@ -1272,6 +1302,11 @@ describe("UniversalDexRouter", function () {
 
         it("Should allow anyone to add funds to a batch", async function () {
             const additionalAmount = ethers.parseUnits("25", 18);
+            const payoutSummary = {
+                amountIn: additionalAmount,
+                amountOut: additionalAmount,
+                path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+            };
 
             // Transfer tokens to user first
             await mockToken2.transfer(user.address, additionalAmount);
@@ -1286,7 +1321,9 @@ describe("UniversalDexRouter", function () {
             await universalDexRouter.connect(user).addFundsToMerkleBatch(
                 await merkleBatchPayout.getAddress(),
                 batchData.batchId,
-                additionalAmount
+                payoutSummary,
+                additionalAmount,
+                (await time.latest()) + 3600
             );
 
             const batchAfter = await merkleBatchPayout.getBatch(batchData.batchId);
@@ -1294,11 +1331,18 @@ describe("UniversalDexRouter", function () {
         });
 
         it("Should revert with invalid Merkle batch payout contract", async function () {
+            const additionalAmount = ethers.parseUnits("50", 18);
             await expect(
                 universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                     ethers.ZeroAddress,
                     batchData.batchId,
-                    ethers.parseUnits("50", 18)
+                    {
+                        amountIn: additionalAmount,
+                        amountOut: additionalAmount,
+                        path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+                    },
+                    additionalAmount,
+                    (await time.latest()) + 3600
                 )
             ).to.be.revertedWith("Invalid Merkle batch payout contract");
         });
@@ -1309,11 +1353,18 @@ describe("UniversalDexRouter", function () {
                 false
             );
 
+            const additionalAmount = ethers.parseUnits("50", 18);
             await expect(
                 universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                     await merkleBatchPayout.getAddress(),
                     batchData.batchId,
-                    ethers.parseUnits("50", 18)
+                    {
+                        amountIn: additionalAmount,
+                        amountOut: additionalAmount,
+                        path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+                    },
+                    additionalAmount,
+                    (await time.latest()) + 3600
                 )
             ).to.be.revertedWith("Unsupported Merkle batch payout contract");
 
@@ -1328,19 +1379,32 @@ describe("UniversalDexRouter", function () {
                 universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                     await merkleBatchPayout.getAddress(),
                     batchData.batchId,
-                    0
+                    {
+                        amountIn: 0,
+                        amountOut: 0,
+                        path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+                    },
+                    0,
+                    (await time.latest()) + 3600
                 )
             ).to.be.revertedWith("Amount must be greater than 0");
         });
 
         it("Should revert with non-existent batch", async function () {
             const fakeBatchId = ethers.keccak256(ethers.toUtf8Bytes("fake-batch"));
+            const additionalAmount = ethers.parseUnits("50", 18);
 
             await expect(
                 universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                     await merkleBatchPayout.getAddress(),
                     fakeBatchId,
-                    ethers.parseUnits("50", 18)
+                    {
+                        amountIn: additionalAmount,
+                        amountOut: additionalAmount,
+                        path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+                    },
+                    additionalAmount,
+                    (await time.latest()) + 3600
                 )
             ).to.be.revertedWith("Batch does not exist");
         });
@@ -1369,7 +1433,13 @@ describe("UniversalDexRouter", function () {
             await universalDexRouter.connect(batchSigner).addFundsToMerkleBatch(
                 await merkleBatchPayout.getAddress(),
                 batchData.batchId,
-                additionalAmount
+                {
+                    amountIn: additionalAmount,
+                    amountOut: additionalAmount,
+                    path: [await mockToken2.getAddress(), await mockToken2.getAddress()]
+                },
+                additionalAmount,
+                (await time.latest()) + 3600
             );
 
             const batchAfterFunding = await merkleBatchPayout.getBatch(batchData.batchId);
