@@ -1,4 +1,4 @@
-import { toUtf8Bytes } from "ethers";
+import { toUtf8Bytes } from 'ethers';
 import { ethers, network as hardhatNetwork } from 'hardhat';
 
 export const deployConfig: Record<
@@ -16,22 +16,26 @@ export const deployConfig: Record<
     uniswapV2Router: '0x1689E7B1F10000AE47eBfE339a4f69dECd19F602',
     wethAddress: '0x4200000000000000000000000000000000000006',
     feeReciever: '0x3fd6ecdcd225c3de0e073b337c4cbac5342e2ac8',
-    merkleBatchContract: '0x71F2c5E6C46B3C35222D6614BD6b7df02b6E7ac8',
-    escrowBatchContract: '0xb18C76B5fa836990dd4FE7c462Ccb50155C5b1c6',
+    merkleBatchContract: '0xd6fa32E528fC49c120e955B2a316d8eF3f78012',
+    escrowBatchContract: '0xb7A22e86077B46228910faAf5Bc7945634AE761e',
   },
   8453: {
     uniswapV2Router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24', // Uniswap V2 Router on Base Mainnet
     wethAddress: '0x4200000000000000000000000000000000000006', // WETH on Base Mainnet
     feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
     merkleBatchContract: '0xcAc04389336e0Df584B34Ce3386CcB8379Cd8D15',
-    escrowBatchContract: process.env.ESCROW_BATCH_CONTRACT || '',
+    escrowBatchContract:
+      process.env.ESCROW_BATCH_CONTRACT ||
+      '0x731BD030D6Ae142CA90aba2159948bDb8810470e',
   },
   56: {
     uniswapV2Router: '0x10ED43C718714eb63d5aA57B78B54704E256024E', // PancakeSwap V2 Router on BSC Mainnet
     wethAddress: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB on BSC Mainnet
     feeReciever: '0x8f2909dAE5B09D976c27B3eA3e1A8312646B099F',
     merkleBatchContract: '0xcAc04389336e0Df584B34Ce3386CcB8379Cd8D15',
-    escrowBatchContract: process.env.ESCROW_BATCH_CONTRACT || '',
+    escrowBatchContract:
+      process.env.ESCROW_BATCH_CONTRACT ||
+      '0xc20d03d736AB13B2E9f91F8DC0846Fa626647611',
   },
 };
 

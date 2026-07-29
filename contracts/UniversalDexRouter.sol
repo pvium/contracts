@@ -990,7 +990,7 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         string calldata memo,
         bytes calldata rootSignature,
         bytes32[] calldata merkleProof,
-        IEscrowBatchPayout.PayoutSigner calldata signerAuthorization
+        IEscrowBatchPayout.PayoutSignerAuthorization calldata signerAuthorization
     ) external nonReentrant {
         if (escrowBatchPayoutContract == address(0)) {
             revert InvalidEscrowBatchPayoutContract();
@@ -998,7 +998,6 @@ contract UniversalDexRouter is AccessControl, ReentrancyGuard {
         if (!supportEscrowBatchPayoutContracts[escrowBatchPayoutContract]) {
             revert UnsupportedEscrowBatchPayoutContract();
         }
-
         IEscrowBatchPayout.EscrowBatch memory batch = IEscrowBatchPayout(
             escrowBatchPayoutContract
         ).getEscrowBatch(escrowBatchId);

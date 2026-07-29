@@ -100,44 +100,51 @@ function signRoot(
 }
 
 interface PayoutSignerAuth {
-  signer: string;
+  signingKey: string;
   transactionMax: bigint | string | number;
   totalMax: bigint | string | number;
   expiration: bigint | string | number;
-  salt: string;
+  timestamp: bigint | string | number;
   signature: string;
 }
 
 const EMPTY_AUTH: PayoutSignerAuth = {
-  signer: ethers.ZeroAddress,
+  signingKey: ethers.ZeroAddress,
   transactionMax: 0,
   totalMax: 0,
   expiration: 0,
-  salt: ethers.ZeroHash,
-  signature: "0x",
+  timestamp: 0,
+  signature: '0x',
 };
 
 function signAuth(
   batchSignerAddress: string,
-  escrowBatchIdValue: string,
+  batchHash: string,
   delegate: string,
   transactionMax: bigint | string | number,
   totalMax: bigint | string | number,
   expiration: bigint | string | number,
-  salt: string
+  timestamp: bigint | string | number,
 ): PayoutSignerAuth {
   const digest = ethers.keccak256(
     ethers.solidityPacked(
-      ["bytes32", "address", "uint256", "uint256", "uint256", "bytes32"],
-      [escrowBatchIdValue, delegate, transactionMax, totalMax, expiration, salt]
-    )
+      ['bytes32', 'address', 'uint256', 'uint256', 'uint256', 'uint256'],
+      [
+        batchHash,
+        delegate,
+        transactionMax,
+        totalMax,
+        expiration,
+        timestamp,
+      ],
+    ),
   );
   return {
-    signer: delegate,
+    signingKey: delegate,
     transactionMax,
     totalMax,
     expiration,
-    salt,
+    timestamp,
     signature: signDigest(batchSignerAddress, digest),
   };
 }
@@ -303,9 +310,11 @@ describe("EscrowBatchPayout", function () {
         root,
         signRoot(other.address, batchHash, root),
         tree.getHexProof(leafHash(batchHash, payment)),
-        EMPTY_AUTH
-      )
-    ).to.be.revertedWith("Invalid root signature");
+        EMPTY_AUTH,
+      ),
+    ).to.be.revertedWith(
+      'Invalid root signature and no signer authorization provided',
+    );
   });
 
   it("does not allow a root signed for one escrow to be replayed on another escrow", async function () {
@@ -349,9 +358,11 @@ describe("EscrowBatchPayout", function () {
         root,
         signRoot(signer.address, firstEscrow.batchHash, root),
         tree.getHexProof(leafHash(firstEscrow.batchHash, payment)),
-        EMPTY_AUTH
-      )
-    ).to.be.revertedWith("Invalid root signature");
+        EMPTY_AUTH,
+      ),
+    ).to.be.revertedWith(
+      'Invalid root signature and no signer authorization provided',
+    );
   });
 
   it("rejects withdrawals before the lock duration expires", async function () {
@@ -484,11 +495,11 @@ describe("EscrowBatchPayout", function () {
         tree.getHexProof(leafHash(batchHash, payment)),
         EMPTY_AUTH
       )
-    ).to.be.revertedWith("Insufficient escrow funds");
+    ).to.be.revertedWith("Insufficient fund in pool");
   });
 
   describe("delegated payout signer", function () {
-    const SALT = ethers.id("delegate-salt");
+    const AUTH_TIMESTAMP = 1_700_000_000;
 
     async function claimAsDelegate(
       batchHash: string,
@@ -509,7 +520,7 @@ describe("EscrowBatchPayout", function () {
         batchHash,
         root,
         // root is signed by the delegate, not the batch signer
-        signRoot(auth.signer, batchHash, root),
+        signRoot(auth.signingKey, batchHash, root),
         tree.getHexProof(leafHash(batchHash, payment)),
         auth
       );
@@ -526,12 +537,12 @@ describe("EscrowBatchPayout", function () {
       };
       const auth = signAuth(
         signer.address,
-        batchId,
+        batchHash,
         other.address,
-        ethers.parseUnits("100", 18),
-        ethers.parseUnits("200", 18),
+        ethers.parseUnits('100', 18),
+        ethers.parseUnits('200', 18),
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
 
       await expect(claimAsDelegate(batchHash, batchId, payment, auth))
@@ -562,12 +573,12 @@ describe("EscrowBatchPayout", function () {
       };
       const auth = signAuth(
         signer.address,
-        batchId,
+        batchHash,
         other.address,
-        ethers.parseUnits("100", 18),
-        ethers.parseUnits("500", 18),
+        ethers.parseUnits('100', 18),
+        ethers.parseUnits('500', 18),
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
 
       await expect(
@@ -595,12 +606,12 @@ describe("EscrowBatchPayout", function () {
       };
       const auth = signAuth(
         signer.address,
-        batchId,
+        batchHash,
         other.address,
         transactionMax,
         totalMax,
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
 
       await claimAsDelegate(batchHash, batchId, payment1, auth);
@@ -622,12 +633,12 @@ describe("EscrowBatchPayout", function () {
       };
       const auth = signAuth(
         signer.address,
-        batchId,
+        batchHash,
         other.address,
-        ethers.parseUnits("100", 18),
-        ethers.parseUnits("200", 18),
+        ethers.parseUnits('100', 18),
+        ethers.parseUnits('200', 18),
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
 
       await expect(escrowBatchPayout.connect(signer).revokeSigner(batchId, other.address))
@@ -651,12 +662,12 @@ describe("EscrowBatchPayout", function () {
       // Authorization signed by `other` (not the batch signer) trying to self-authorize.
       const auth = signAuth(
         other.address,
-        batchId,
+        batchHash,
         other.address,
-        ethers.parseUnits("100", 18),
-        ethers.parseUnits("200", 18),
+        ethers.parseUnits('100', 18),
+        ethers.parseUnits('200', 18),
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
 
       await expect(
@@ -676,18 +687,250 @@ describe("EscrowBatchPayout", function () {
       // Batch signer authorizes `other`, but caller swaps in receiver2 as the signer.
       const auth = signAuth(
         signer.address,
-        batchId,
+        batchHash,
         other.address,
-        ethers.parseUnits("100", 18),
-        ethers.parseUnits("200", 18),
+        ethers.parseUnits('100', 18),
+        ethers.parseUnits('200', 18),
         now + 3600,
-        SALT
+        AUTH_TIMESTAMP,
       );
-      auth.signer = receiver2.address;
+      auth.signingKey = receiver2.address;
 
       await expect(
         claimAsDelegate(batchHash, batchId, payment, auth)
       ).to.be.revertedWith("Invalid signer authorization");
+    });
+  });
+
+  describe("cancelClaims", function () {
+    const AUTH_TIMESTAMP = 1_700_000_000;
+
+    function leafHex(batchHash: string, payment: EscrowPaymentEntry): string {
+      return `0x${leafHash(batchHash, payment).toString("hex")}`;
+    }
+
+    function makePayment(
+      receiverAddress: string,
+      now: number,
+      memo = "Cancelable payment"
+    ): EscrowPaymentEntry {
+      return {
+        receiverAddress,
+        amount: ethers.parseUnits("100", 18).toString(),
+        claimableDate: now,
+        memo,
+      };
+    }
+
+    // Claims a single-payment leaf as the batch signer (root signed by signer).
+    function claimBySigner(
+      batchHash: string,
+      batchId: string,
+      payment: EscrowPaymentEntry
+    ) {
+      const tree = buildTree(batchHash, [payment]);
+      const root = `0x${tree.getRoot().toString("hex")}`;
+      return escrowBatchPayout.claimPayment(
+        {
+          receiver: payment.receiverAddress,
+          amount: payment.amount,
+          claimDate: payment.claimableDate,
+          memo: payment.memo,
+        },
+        batchId,
+        batchHash,
+        root,
+        signRoot(signer.address, batchHash, root),
+        tree.getHexProof(leafHash(batchHash, payment)),
+        EMPTY_AUTH
+      );
+    }
+
+    function delegateAuth(
+      batchHash: string,
+      delegate: string,
+      overrides: Partial<{
+        batchSigner: string;
+        expiration: number;
+      }> = {}
+    ): PayoutSignerAuth {
+      return signAuth(
+        overrides.batchSigner || signer.address,
+        batchHash,
+        delegate,
+        ethers.parseUnits("100", 18),
+        ethers.parseUnits("200", 18),
+        overrides.expiration ?? AUTH_TIMESTAMP + 10_000_000_000,
+        AUTH_TIMESTAMP
+      );
+    }
+
+    it("lets the funding signer cancel a leaf, blocking its claim", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const payment = makePayment(receiver1.address, now);
+      const leaf = leafHex(batchHash, payment);
+
+      await expect(
+        escrowBatchPayout.connect(signer).cancelClaims(batchId, [leaf], EMPTY_AUTH)
+      )
+        .to.emit(escrowBatchPayout, "ClaimCancelled")
+        .withArgs(batchId, leaf, signer.address);
+
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf)).to.equal(true);
+
+      await expect(claimBySigner(batchHash, batchId, payment)).to.be.revertedWith(
+        "Payment cancelled"
+      );
+    });
+
+    it("lets an authorized delegate cancel a leaf", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const payment = makePayment(receiver1.address, now);
+      const leaf = leafHex(batchHash, payment);
+      const auth = delegateAuth(batchHash, other.address);
+
+      await expect(
+        escrowBatchPayout.connect(other).cancelClaims(batchId, [leaf], auth)
+      )
+        .to.emit(escrowBatchPayout, "ClaimCancelled")
+        .withArgs(batchId, leaf, other.address);
+
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf)).to.equal(true);
+    });
+
+    it("cancels multiple leaves in one call", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const p1 = makePayment(receiver1.address, now, "one");
+      const p2 = makePayment(receiver2.address, now, "two");
+      const leaf1 = leafHex(batchHash, p1);
+      const leaf2 = leafHex(batchHash, p2);
+
+      await escrowBatchPayout
+        .connect(signer)
+        .cancelClaims(batchId, [leaf1, leaf2], EMPTY_AUTH);
+
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf1)).to.equal(true);
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf2)).to.equal(true);
+      await expect(claimBySigner(batchHash, batchId, p1)).to.be.revertedWith(
+        "Payment cancelled"
+      );
+      await expect(claimBySigner(batchHash, batchId, p2)).to.be.revertedWith(
+        "Payment cancelled"
+      );
+    });
+
+    it("rejects an unauthorized caller with no authorization", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+
+      await expect(
+        escrowBatchPayout
+          .connect(receiver1)
+          .cancelClaims(batchId, [leaf], EMPTY_AUTH)
+      ).to.be.revertedWith("Not authorized to cancel");
+    });
+
+    it("rejects when the caller is not the authorized signingKey", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+      // Signer authorizes `other`, but receiver2 tries to use it.
+      const auth = delegateAuth(batchHash, other.address);
+
+      await expect(
+        escrowBatchPayout.connect(receiver2).cancelClaims(batchId, [leaf], auth)
+      ).to.be.revertedWith("Caller is not the authorized signer");
+    });
+
+    it("rejects an authorization not signed by the funding signer", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+      // `other` self-signs an authorization for itself.
+      const auth = delegateAuth(batchHash, other.address, {
+        batchSigner: other.address,
+      });
+
+      await expect(
+        escrowBatchPayout.connect(other).cancelClaims(batchId, [leaf], auth)
+      ).to.be.revertedWith("Invalid signer authorization");
+    });
+
+    it("rejects a revoked delegate", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+      const auth = delegateAuth(batchHash, other.address);
+
+      await escrowBatchPayout.connect(signer).revokeSigner(batchId, other.address);
+
+      await expect(
+        escrowBatchPayout.connect(other).cancelClaims(batchId, [leaf], auth)
+      ).to.be.revertedWith("Signer authorization revoked");
+    });
+
+    it("rejects an expired authorization", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+      const auth = delegateAuth(batchHash, other.address, { expiration: 1 });
+
+      await expect(
+        escrowBatchPayout.connect(other).cancelClaims(batchId, [leaf], auth)
+      ).to.be.revertedWith("Signer authorization expired");
+    });
+
+    it("rejects an empty leaves array", async function () {
+      const { batchId } = await createEscrow();
+
+      await expect(
+        escrowBatchPayout.connect(signer).cancelClaims(batchId, [], EMPTY_AUTH)
+      ).to.be.revertedWith("No leaves provided");
+    });
+
+    it("skips already-claimed leaves without reverting", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const payment = makePayment(receiver1.address, now);
+      const leaf = leafHex(batchHash, payment);
+
+      await claimBySigner(batchHash, batchId, payment);
+
+      // Cancel is a no-op for the claimed leaf: no revert, no cancellation.
+      await expect(
+        escrowBatchPayout.connect(signer).cancelClaims(batchId, [leaf], EMPTY_AUTH)
+      ).to.not.emit(escrowBatchPayout, "ClaimCancelled");
+      expect(await escrowBatchPayout.isClaimed(batchId, leaf)).to.equal(true);
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf)).to.equal(false);
+    });
+
+    it("is idempotent for already-cancelled leaves", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+
+      await escrowBatchPayout.connect(signer).cancelClaims(batchId, [leaf], EMPTY_AUTH);
+      // Second cancel is a no-op — no event, no revert.
+      await expect(
+        escrowBatchPayout.connect(signer).cancelClaims(batchId, [leaf], EMPTY_AUTH)
+      ).to.not.emit(escrowBatchPayout, "ClaimCancelled");
+      expect(await escrowBatchPayout.isCancelled(batchId, leaf)).to.equal(true);
+    });
+
+    it("does not move funds when cancelling", async function () {
+      const { batchHash, batchId } = await createEscrow();
+      const now = await time.latest();
+      const leaf = leafHex(batchHash, makePayment(receiver1.address, now));
+
+      const before = await escrowBatchPayout.getRemainingFunds(batchId);
+      await escrowBatchPayout.connect(signer).cancelClaims(batchId, [leaf], EMPTY_AUTH);
+      const after = await escrowBatchPayout.getRemainingFunds(batchId);
+
+      expect(after).to.equal(before);
     });
   });
 });

@@ -1,13 +1,18 @@
-import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-ethers";
-import "@nomicfoundation/hardhat-chai-matchers";
-import "@nomicfoundation/hardhat-verify";
-import "@typechain/hardhat";
-import "hardhat-gas-reporter";
-import "solidity-coverage";
-import "dotenv/config";
+import { HardhatUserConfig } from 'hardhat/config';
+import '@nomicfoundation/hardhat-ethers';
+import '@nomicfoundation/hardhat-chai-matchers';
+import '@nomicfoundation/hardhat-verify';
+import '@typechain/hardhat';
+import 'hardhat-gas-reporter';
+import 'solidity-coverage';
+import 'dotenv/config';
 
 const config: HardhatUserConfig = {
+  // Sourcify's v1 API is in a deprecation brownout (503s through Jan 2027).
+  // Verify via Etherscan/Basescan (etherscan block below) instead.
+  sourcify: {
+    enabled: false,
+  },
   solidity: {
     version: '0.8.24',
     settings: {

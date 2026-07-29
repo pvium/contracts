@@ -25,12 +25,12 @@ interface IEscrowBatchPayout {
         string memo;
     }
 
-     struct PayoutSigner {
-        address signer;
+    struct PayoutSignerAuthorization {
+        address signingKey;
         uint256 transactionMax;
         uint256 totalMax;
         uint256 expiration;
-        bytes32 salt;
+        uint256 timestamp;
         bytes signature;
     }
 
@@ -52,16 +52,27 @@ interface IEscrowBatchPayout {
         bytes32 merkleRoot,
         bytes calldata rootSignature,
         bytes32[] calldata merkleProof,
-        PayoutSigner calldata signerAuthorization
+        PayoutSignerAuthorization calldata signerAuthorization
     ) external returns (bytes32);
 
-    function addFundsToEscrowBatch(bytes32 escrowBatchId, uint256 amount) external;
+    function addFundsToEscrowBatch(
+        bytes32 escrowBatchId,
+        uint256 amount
+    ) external;
 
-    function setLockDuration(bytes32 escrowBatchId, uint256 newLockDuration) external;
+    function setLockDuration(
+        bytes32 escrowBatchId,
+        uint256 newLockDuration
+    ) external;
 
-    function withdrawEscrowFunds(bytes32 escrowBatchId, uint256 amount) external;
+    function withdrawEscrowFunds(
+        bytes32 escrowBatchId,
+        uint256 amount
+    ) external;
 
     function revokeSigner(bytes32 escrowBatchId, address signer) external;
 
-    function getEscrowBatch(bytes32 escrowBatchId) external view returns (EscrowBatch memory);
+    function getEscrowBatch(
+        bytes32 escrowBatchId
+    ) external view returns (EscrowBatch memory);
 }

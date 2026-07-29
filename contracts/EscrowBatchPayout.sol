@@ -18,8 +18,10 @@ contract EscrowBatchPayout is ReentrancyGuard {
 
     mapping(bytes32 => IEscrowBatchPayout.EscrowBatch) public escrowBatches;
     mapping(bytes32 => mapping(bytes32 => bool)) public claimed;
+    mapping(bytes32 => mapping(bytes32 => bool)) public cancelledClaim;
     mapping(bytes32 => mapping(address => bool)) public revokedSigners;
     mapping(bytes32 => mapping(address => uint256)) public signerSpent;
+    mapping(bytes32 => uint256) public lastFundedAt;
 
     event EscrowBatchCreated(
         bytes32 indexed escrowBatchHash,
@@ -53,6 +55,12 @@ contract EscrowBatchPayout is ReentrancyGuard {
         address indexed caller
     );
 
+    event ClaimCancelled(
+        bytes32 indexed escrowBatchId,
+        bytes32 indexed leaf,
+        address indexed caller
+    );
+
     event EscrowFundsWithdrawn(
         bytes32 indexed escrowBatchId,
         address indexed caller,
@@ -81,13 +89,25 @@ contract EscrowBatchPayout is ReentrancyGuard {
         require(fundingToken != address(0), "Invalid funding token");
         require(amount > 0, "Amount must be greater than 0");
         require(lockDuration > 0, "Invalid lock duration");
-        require(signer == msg.sender || signature.length > 0, "Only signer can create escrow");
+        require(
+            signer == msg.sender || signature.length > 0,
+            "Only signer can create escrow"
+        );
 
         bytes32 escrowBatchHash = keccak256(
-            abi.encode(externalBatchId, fundingToken, lockDuration, nonce, block.chainid)
+            abi.encode(
+                externalBatchId,
+                fundingToken,
+                lockDuration,
+                nonce,
+                block.chainid
+            )
         );
         escrowBatchId = keccak256(abi.encodePacked(signer, escrowBatchHash));
-        require(!escrowBatches[escrowBatchId].exists, "Escrow batch already exists");
+        require(
+            !escrowBatches[escrowBatchId].exists,
+            "Escrow batch already exists"
+        );
 
         if (signature.length > 0) {
             bytes32 messageHash = keccak256(
@@ -97,9 +117,15 @@ contract EscrowBatchPayout is ReentrancyGuard {
             require(recoveredSigner == signer, "Invalid signature");
         }
 
-        IERC20(fundingToken).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(fundingToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            amount
+        );
 
-        address withdrawer = withdrawalWallet == address(0) ? signer : withdrawalWallet;
+        address withdrawer = withdrawalWallet == address(0)
+            ? signer
+            : withdrawalWallet;
         escrowBatches[escrowBatchId] = IEscrowBatchPayout.EscrowBatch({
             batchHash: escrowBatchHash,
             externalBatchId: externalBatchId,
@@ -133,7 +159,7 @@ contract EscrowBatchPayout is ReentrancyGuard {
         bytes32 merkleRoot,
         bytes calldata rootSignature,
         bytes32[] calldata merkleProof,
-        IEscrowBatchPayout.PayoutSigner calldata signerAuthorization
+        IEscrowBatchPayout.PayoutSignerAuthorization calldata signerAuthorization
     ) external nonReentrant returns (bytes32 leaf) {
         IEscrowBatchPayout.EscrowBatch storage batch = escrowBatches[
             escrowBatchId
@@ -141,39 +167,69 @@ contract EscrowBatchPayout is ReentrancyGuard {
         require(batch.exists, "Escrow batch does not exist");
         require(merkleRoot != bytes32(0), "Invalid merkle root");
         require(rootSignature.length > 0, "Root signature required");
-        require(block.timestamp >= payment.claimDate, "Payment not yet claimable");
-        bytes32 rootMessageHash = keccak256(
-                abi.encodePacked(batch.batchHash, merkleRoot)
+        require(
+            block.timestamp >= payment.claimDate,
+            "Payment not yet claimable"
         );
-        address recoveredRootSigner = ECDSA.recover(rootMessageHash, rootSignature);
+        bytes32 rootMessageHash = keccak256(
+            abi.encodePacked(batch.batchHash, merkleRoot)
+        );
+
+        address recoveredRootSigner = ECDSA.recover(
+            rootMessageHash,
+            rootSignature
+        );
         address authorizedSigner;
-        if(signerAuthorization.signature.length > 0) {
-            require(!revokedSigners[escrowBatchId][signerAuthorization.signer], "Signer authorization revoked");
-            require(block.timestamp < signerAuthorization.expiration, "Signer authorization expired");
+        if (recoveredRootSigner != batch.signer) {
+            require(
+                signerAuthorization.signature.length > 0,
+                "Invalid root signature and no signer authorization provided"
+            );
+
+            require(
+                !revokedSigners[escrowBatchId][signerAuthorization.signingKey],
+                "Signer authorization revoked"
+            );
+            require(
+                //  signerAuthorization.expiration == 0 ||
+                block.timestamp < signerAuthorization.expiration,
+                "Signer authorization expired"
+            );
             bytes32 authMessageHash = keccak256(
                 abi.encodePacked(
-                    escrowBatchId,
-                    signerAuthorization.signer,
+                    batch.batchHash,
+                    signerAuthorization.signingKey,
                     signerAuthorization.transactionMax,
                     signerAuthorization.totalMax,
                     signerAuthorization.expiration,
-                    signerAuthorization.salt
+                    signerAuthorization.timestamp
                 )
             );
-            address recoveredAuthSigner = ECDSA.recover(authMessageHash, signerAuthorization.signature);
-            require(recoveredAuthSigner == batch.signer, "Invalid signer authorization");
-            require(payment.amount <= signerAuthorization.transactionMax, "Payment exceeds transaction limit");
+            address recoveredAuthSigner = ECDSA.recover(
+                authMessageHash,
+                signerAuthorization.signature
+            );
             require(
-                signerSpent[escrowBatchId][signerAuthorization.signer] + payment.amount <= signerAuthorization.totalMax,
+                recoveredAuthSigner == batch.signer,
+                "Invalid signer authorization"
+            );
+            require(
+                payment.amount <= signerAuthorization.transactionMax,
+                "Payment exceeds transaction limit"
+            );
+            require(
+                signerSpent[escrowBatchId][signerAuthorization.signingKey] +
+                    payment.amount <=
+                    signerAuthorization.totalMax,
                 "Payment exceeds signer total allowance"
             );
 
-            require(recoveredRootSigner == signerAuthorization.signer, "Invalid root signature");
-            authorizedSigner = signerAuthorization.signer;
-        } else {
-            require(recoveredRootSigner == batch.signer, "Invalid root signature");
+            require(
+                recoveredRootSigner == signerAuthorization.signingKey,
+                "Invalid root signature"
+            );
+            authorizedSigner = signerAuthorization.signingKey;
         }
-
 
         leaf = keccak256(
             abi.encodePacked(
@@ -185,13 +241,15 @@ contract EscrowBatchPayout is ReentrancyGuard {
             )
         );
         require(!claimed[escrowBatchId][leaf], "Payment already claimed");
+        require(!cancelledClaim[escrowBatchId][leaf], "Payment cancelled");
         require(
             MerkleProof.verify(merkleProof, merkleRoot, leaf),
             "Invalid merkle proof"
         );
         require(
-            batch.totalClaimed + batch.totalWithdrawn + payment.amount <= batch.totalFunded,
-            "Insufficient escrow funds"
+            batch.totalClaimed + batch.totalWithdrawn + payment.amount <=
+                batch.totalFunded,
+            "Insufficient fund in pool"
         );
 
         claimed[escrowBatchId][leaf] = true;
@@ -201,7 +259,10 @@ contract EscrowBatchPayout is ReentrancyGuard {
             signerSpent[escrowBatchId][authorizedSigner] += payment.amount;
         }
 
-        IERC20(batch.fundingToken).safeTransfer(payment.receiver, payment.amount);
+        IERC20(batch.fundingToken).safeTransfer(
+            payment.receiver,
+            payment.amount
+        );
 
         emit EscrowPaymentClaimed(
             escrowBatchId,
@@ -211,6 +272,84 @@ contract EscrowBatchPayout is ReentrancyGuard {
             payment.memo,
             authorizedSigner
         );
+    }
+
+    /**
+     * @dev Voids one or more scheduled payment leaves in a single escrow batch
+     *      so they can never be claimed. Callable by the funding signer, or by
+     *      a delegate the funding signer authorized (same authorization proof
+     *      used in claimPayment). Authorization is validated once for the batch,
+     *      then every leaf is cancelled. Already-claimed and already-cancelled
+     *      leaves are skipped so a batch stays robust to races. Does not move
+     *      funds — freed capacity stays in the pool for other claims or
+     *      withdrawal.
+     *
+     *      Scoped to a single batch because the delegate authorization is
+     *      cryptographically bound to that batch's batchHash; cancel across
+     *      batches with one call per batch.
+     */
+    function cancelClaims(
+        bytes32 escrowBatchId,
+        bytes32[] calldata leaves,
+        IEscrowBatchPayout.PayoutSignerAuthorization calldata signerAuthorization
+    ) external {
+        IEscrowBatchPayout.EscrowBatch storage batch = escrowBatches[
+            escrowBatchId
+        ];
+        require(batch.exists, "Escrow batch does not exist");
+        require(leaves.length > 0, "No leaves provided");
+
+        // Caller must be the funding signer, or a delegate the funding signer
+        // authorized — validated the same way claimPayment validates a
+        // delegated root signer.
+        if (msg.sender != batch.signer) {
+            require(
+                signerAuthorization.signature.length > 0,
+                "Not authorized to cancel"
+            );
+            require(
+                msg.sender == signerAuthorization.signingKey,
+                "Caller is not the authorized signer"
+            );
+            require(
+                !revokedSigners[escrowBatchId][signerAuthorization.signingKey],
+                "Signer authorization revoked"
+            );
+            require(
+                block.timestamp < signerAuthorization.expiration,
+                "Signer authorization expired"
+            );
+            bytes32 authMessageHash = keccak256(
+                abi.encodePacked(
+                    batch.batchHash,
+                    signerAuthorization.signingKey,
+                    signerAuthorization.transactionMax,
+                    signerAuthorization.totalMax,
+                    signerAuthorization.expiration,
+                    signerAuthorization.timestamp
+                )
+            );
+            address recoveredAuthSigner = ECDSA.recover(
+                authMessageHash,
+                signerAuthorization.signature
+            );
+            require(
+                recoveredAuthSigner == batch.signer,
+                "Invalid signer authorization"
+            );
+        }
+
+        for (uint256 i = 0; i < leaves.length; i++) {
+            bytes32 leaf = leaves[i];
+            if (
+                claimed[escrowBatchId][leaf] ||
+                cancelledClaim[escrowBatchId][leaf]
+            ) {
+                continue;
+            }
+            cancelledClaim[escrowBatchId][leaf] = true;
+            emit ClaimCancelled(escrowBatchId, leaf, msg.sender);
+        }
     }
 
     function revokeSigner(bytes32 escrowBatchId, address signer) external {
@@ -223,7 +362,10 @@ contract EscrowBatchPayout is ReentrancyGuard {
             "Only escrow creator can revoke signer"
         );
         require(signer != address(0), "Invalid signer address");
-        require(!revokedSigners[escrowBatchId][signer], "Signer already revoked");
+        require(
+            !revokedSigners[escrowBatchId][signer],
+            "Signer already revoked"
+        );
 
         revokedSigners[escrowBatchId][signer] = true;
 
@@ -270,7 +412,7 @@ contract EscrowBatchPayout is ReentrancyGuard {
             "Only escrow creator can withdraw"
         );
         require(
-            block.timestamp > batch.createdAt + batch.lockDuration,
+            block.timestamp > lastFundedAt[escrowBatchId] + batch.lockDuration,
             "Escrow still locked"
         );
         require(amount > 0, "Amount must be greater than 0");
@@ -308,7 +450,7 @@ contract EscrowBatchPayout is ReentrancyGuard {
             amount
         );
         batch.totalFunded += amount;
-
+        lastFundedAt[escrowBatchId] = block.timestamp;
         emit EscrowBatchFunded(
             escrowBatchId,
             batch.batchHash,
@@ -328,6 +470,13 @@ contract EscrowBatchPayout is ReentrancyGuard {
         bytes32 leaf
     ) external view returns (bool) {
         return claimed[escrowBatchId][leaf];
+    }
+
+    function isCancelled(
+        bytes32 escrowBatchId,
+        bytes32 leaf
+    ) external view returns (bool) {
+        return cancelledClaim[escrowBatchId][leaf];
     }
 
     function getRemainingFunds(
